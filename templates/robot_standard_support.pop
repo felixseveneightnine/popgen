@@ -1,0 +1,79 @@
+WaveSchedule
+{
+	Templates
+	{
+		// Sniper
+		T_TFBot_Sniper
+		{
+			Class Sniper
+			Skill Hard
+			MaxVisionRange 2500
+		}
+
+		T_TFBot_Sniper_Razorback
+		{
+			Class Sniper
+			Name "Razorback Sniper"
+			Skill Hard
+			Item "The Razorback"
+			MaxVisionRange 2500
+		}
+
+		T_TFBot_Sniper_Sydney_Sleeper
+		{
+			Class Sniper
+			Name "Sydney Sniper"
+			Skill Hard
+			ClassIcon sniper_sydneysleeper
+			Item "The Sydney Sleeper"
+			MaxVisionRange 3000
+		}
+
+		// Spy
+		T_TFBot_Spy
+		{
+			Class Spy
+			Skill Expert
+		}
+
+		//Engineer
+		T_TFBot_Engineer_Sentry_Teleporter
+		{
+			Class Engineer
+			Name "Teleporter Engineer"
+			Skill Expert
+			TeleportWhere spawnbot
+			Health 500
+			Attributes TeleportToHint
+		}
+
+		//TELEPORT INTO MAP DO NOT BUILD TELEPORTER
+		T_TFBot_Engineer_Sentry_Battle_TeleIn
+		{
+			Class Engineer
+			Name "Engineer"
+			Skill Expert
+			Health 275
+			Attributes TeleportToHint
+		}
+
+		//NOT TELEPORT INTO MAP ENGY
+		T_TFBot_Engineer_Sentry_Tele_Battle
+		{
+			Class Engineer
+			Name "Teleporter Engineer"
+			Skill Expert
+			TeleportWhere spawnbot
+			Health 275
+		}
+
+		//NOT TELEPORT INTO MAP ENGY AND DOES NOT BUILD A TELEPORTER
+		T_TFBot_Engineer_Sentry_Battle
+		{
+			Class Engineer
+			Name "Engineer"
+			Skill Expert
+			Health 275
+		}
+	}
+}

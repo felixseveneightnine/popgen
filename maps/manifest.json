@@ -1,0 +1,9 @@
+[
+  { "name": "bigrock", "gatebot": false },
+  { "name": "coaltown", "gatebot": false },
+  { "name": "decoy", "gatebot": false },
+  { "name": "ghost_town", "gatebot": false },
+  { "name": "mannhattan", "gatebot": false },
+  { "name": "mannworks", "gatebot": false },
+  { "name": "rottenburg", "gatebot": false }
+]

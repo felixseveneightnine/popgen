@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TF2 Popfile Generator</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="app-header-text">
+      <h1>TF2 Popfile Generator</h1>
+      <p class="subtitle">Build Mann vs. Machine mission files (.pop)</p>
+    </div>
+    <button id="waveDrawerToggle" class="drawer-toggle" type="button"
+            aria-controls="waveDrawer" aria-expanded="false">
+      <span class="drawer-toggle-bars" aria-hidden="true"></span>
+      Waves
+    </button>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="panel form-panel">
+        <h2>Mission Settings</h2>
+
+        <label for="missionName">Mission Name</label>
+        <input type="text" id="missionName" value="MyMission" spellcheck="false">
+
+        <label for="startingMoney">Starting Money</label>
+        <input type="number" id="startingMoney" value="400" min="0" step="50">
+
+        <label for="respawnWaveTime">Respawn Wave Time</label>
+        <input type="number" id="respawnWaveTime" value="6" min="0">
+
+        <label for="difficulty">Difficulty</label>
+        <select id="difficulty">
+          <option value="normal">Normal</option>
+          <option value="intermediate">Intermediate</option>
+          <option value="advanced">Advanced</option>
+          <option value="expert">Expert</option>
+        </select>
+
+        <label for="mapSelect">Map</label>
+        <select id="mapSelect">
+          <option value="" disabled selected>Loading maps...</option>
+        </select>
+
+        <label class="checkbox-row">
+          <input type="checkbox" id="canBotsAttackInSpawnRoom">
+          Can Bots Attack In Spawnroom?
+        </label>
+
+        <label class="checkbox-row">
+          <input type="checkbox" id="halloween">
+          Halloween
+        </label>
+
+        <label class="checkbox-row">
+          <input type="checkbox" id="fixedRespawnWaveTime">
+          Fixed Respawn Time
+        </label>
+
+        <label for="waveStartRelay">Wave Start Relay</label>
+        <input type="text" id="waveStartRelay" spellcheck="false">
+
+        <label for="waveDoneRelay">Wave Finished Relay</label>
+        <input type="text" id="waveDoneRelay" spellcheck="false">
+
+        <label for="sentryBusterDamage">Spawn Sentry Buster when damage exceeds...</label>
+        <input type="number" id="sentryBusterDamage" placeholder="3000" min="0">
+
+        <label for="sentryBusterKills">Spawn Sentry Buster when kills exceeds...</label>
+        <input type="number" id="sentryBusterKills" placeholder="15" min="0">
+
+        <label for="advancedFlag">Advanced</label>
+        <input type="number" id="advancedFlag" placeholder="0">
+      </section>
+
+      <button id="downloadBtn" class="primary-btn">Download Popfile</button>
+      <p id="status" class="status-text"></p>
+    </aside>
+
+    <section class="panel content-panel">
+      <div class="wave-tab-bar">
+        <button id="addWaveBtn" class="wave-tab-add" title="Add Wave">+</button>
+        <div id="waveTabs" class="wave-tabs"></div>
+        <div class="tab-bar-spacer"></div>
+        <div id="missionTabs" class="wave-tabs"></div>
+        <button id="addMissionBtn" class="wave-tab-add" title="Add Support">+</button>
+      </div>
+      <div class="wave-body">
+        <aside class="robot-sidebar">
+          <h3>Robots</h3>
+          <div id="robotTabs" class="robot-tabs"></div>
+          <div id="robotList" class="robot-list"></div>
+        </aside>
+        <div id="waveContent" class="wave-content"></div>
+      </div>
+    </section>
+
+  </main>
+
+  <div id="waveDrawerScrim" class="wave-drawer-scrim" hidden></div>
+
+  <aside id="waveDrawer" class="wave-drawer" aria-label="Waves">
+    <div class="wave-drawer-head">
+      <h3>Waves</h3>
+      <button id="waveDrawerClose" class="wave-drawer-close" type="button" aria-label="Close">&times;</button>
+    </div>
+    <p id="startingCurrency" class="wavebar-starting-currency"></p>
+    <div id="waveBar" class="wavebar-stack"></div>
+  </aside>
+
+  <footer class="app-footer">
+  </footer>
+
+  <script src="js/popParser.js"></script>
+  <script src="js/bsp.js"></script>
+  <script src="js/script.js"></script>
+</body>
+</html>

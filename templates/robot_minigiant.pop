@@ -1,0 +1,108 @@
+WaveSchedule
+{
+	Templates
+	{
+		T_TFBot_Sniper_Huntsman_Spammer
+		{
+			Class Sniper
+			Name "Rapid Fire Bowman"
+			Item "The Huntsman"
+			ClassIcon sniper_bow_multi
+			Skill Hard
+			Health 1200
+			"scale" 1.5
+			ItemAttributes
+			{
+				ItemName "The Huntsman"
+				"fire rate bonus" 0.6
+			}
+			CharacterAttributes
+			{
+				"head scale" 0.7
+				"move speed bonus"	0.85
+			}
+		}
+
+		T_TFBot_Scout_Shortstop
+		{
+			Class Scout
+			Skill Easy
+			ClassIcon scout_shortstop
+			Item "The Shortstop"
+			Name "Shortstop Scout"
+			Health 650
+			Scale 1.4
+
+			CharacterAttributes
+			{
+				"head scale" 0.7
+				"move speed bonus" 1.25
+			}
+		}
+
+		T_TFBot_Heavyweapons_Fist
+		{
+			Class Heavyweapons
+			Name "Steel Gauntlet"
+			Skill Hard
+			ClassIcon heavy_steelfist
+			//Attributes DefensiveBuffHigh	// Passive damage reduction, replaces high health
+			Health 900
+			Scale 1.5						// Force scale to 1 when "Health" set high
+			WeaponRestrictions MeleeOnly
+			Item "Fists of Steel"
+		}
+
+		T_TFBot_Heavy_IronFist_Airblast
+		{
+			Class Heavyweapons
+			Name "Steel Gauntlet Pusher"
+			ClassIcon heavy_steelfist
+			Health 900
+			Scale 1.5
+			WeaponRestrictions MeleeOnly			
+			Skill Expert	
+			Item "The carl"
+			Item "Fists of Steel"
+			ItemAttributes
+			{
+				ItemName "Fists of Steel"
+				"damage causes airblast" 1
+				"damage bonus" 1.5
+			}						
+		}
+		
+		T_TFBot_Demoman_Samurai // Jumps high randomly, will charge towards player after it hits peak jump height
+		//Ask programmer about multiple attributes on weapons
+		{
+			Class Demoman
+			Name "Samurai Demo"
+			ClassIcon demoknight_samurai
+			Skill Expert
+			Item "The Half-Zatoichi"
+			Item "The Splendid Screen"
+			ItemAttributes
+			{
+				ItemName "The Splendid Screen"
+				"Attack not cancel charge" 1
+			}
+			Item "Demo Kabuto"
+			Scale "1.3"
+			Health 650
+			WeaponRestrictions MeleeOnly
+			Attributes AirChargeOnly
+			//Attributes AlwaysCrit
+			Attributes AutoJump
+				AutoJumpMin 10
+				AutoJumpMax 10
+			CharacterAttributes
+			{
+				"charge time increased" 2
+				"charge recharge rate increased" 7
+				"increased jump height" 2.3
+				"bot custom jump particle"	1
+				"damage bonus"	1.5
+			}
+		}
+	}
+}
