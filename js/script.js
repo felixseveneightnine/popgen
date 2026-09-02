@@ -1,8 +1,52 @@
+import { parsePop, findEntry, collectValues, extractTemplates, serializePopEntries } from "./parsers/popParser.js";
+import {
+  SKILLS,
+  TANK_TEMPLATE,
+  TANK_DEFAULTS,
+  isTankSlot,
+  createRobotSlot,
+  normalizeRobotSlot,
+  createWaveSpawn,
+  createWave,
+  createMission,
+  mergeDefaults,
+  clampIndex,
+} from "./model/factories.js";
+import {
+  filledSlots,
+  syncSquadCount,
+  applyTankConstraints,
+  countWaveRobots,
+  waveCurrency,
+  activeSupportForWave,
+  waveSpawnNameExists,
+  isGiantTemplate,
+  templateAlwaysCrits,
+  robotDisplayName,
+  adoptTemplateDefaults,
+  missionObjective,
+} from "./model/analysis.js";
+import {
+  SUPPORT_TEMPLATES,
+  CLASS_ORDER,
+  classRank,
+  applyImportedTemplates,
+  loadRobots as loadRobotLibrary,
+  getRobotGroups,
+  getRobotIconByName,
+  getRobotTemplateByName,
+} from "./robots/robotLibrary.js";
+import { loadMaps as loadMapLibrary, refreshMapInfo as refreshMapInfoLibrary, getMapsByName, getMapInfoByMap } from "./maps/mapLibrary.js";
+import { robotIcon } from "./ui/robotIcon.js";
+import { createStore } from "./state/store.js";
+import { saveToStorage, loadFromLocalStorage, loadFromIndexedDbFallback } from "./state/persistence.js";
+
 const missionNameEl = document.getElementById("missionName");
 const startingMoneyEl = document.getElementById("startingMoney");
 const respawnWaveTimeEl = document.getElementById("respawnWaveTime");
 const difficultyEl = document.getElementById("difficulty");
 const mapSelectEl = document.getElementById("mapSelect");
+const gatebotOverrideEl = document.getElementById("gatebotOverride");
 const canBotsAttackInSpawnRoomEl = document.getElementById("canBotsAttackInSpawnRoom");
 const halloweenEl = document.getElementById("halloween");
 const fixedRespawnWaveTimeEl = document.getElementById("fixedRespawnWaveTime");
@@ -24,6 +68,15 @@ const waveDrawerEl = document.getElementById("waveDrawer");
 const waveDrawerScrimEl = document.getElementById("waveDrawerScrim");
 const waveDrawerToggleEl = document.getElementById("waveDrawerToggle");
 const waveDrawerCloseEl = document.getElementById("waveDrawerClose");
+const importBtnEl = document.getElementById("importBtn");
+const importFileInputEl = document.getElementById("importFileInput");
+const randomBtnEl = document.getElementById("randomBtn");
+const helpBtnEl = document.getElementById("helpBtn");
+const helpModalEl = document.getElementById("helpModal");
+const helpModalScrimEl = document.getElementById("helpModalScrim");
+const helpModalCloseEl = document.getElementById("helpModalClose");
+const undoBtnEl = document.getElementById("undoBtn");
+const redoBtnEl = document.getElementById("redoBtn");
 
 function setWaveDrawer(open) {
   waveDrawerEl.classList.toggle("open", open);
@@ -36,20 +89,25 @@ waveDrawerToggleEl.addEventListener("click", () => {
 });
 waveDrawerCloseEl.addEventListener("click", () => setWaveDrawer(false));
 waveDrawerScrimEl.addEventListener("click", () => setWaveDrawer(false));
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") setWaveDrawer(false);
-});
 
 // Start from a state JS owns rather than trusting the markup to match.
 setWaveDrawer(false);
 
-const SKILLS = ["Easy", "Normal", "Hard", "Expert"];
+function setHelpModal(open) {
+  helpModalEl.hidden = !open;
+  helpModalScrimEl.hidden = !open;
+}
 
-// A Tank is not a bot template -- it becomes a Tank block in the WaveSpawn
-// rather than a TFBot -- but it is picked from the robot list the same way, so
-// it rides along under this sentinel name.
-const TANK_TEMPLATE = "Tank";
-const TANK_DEFAULTS = { health: 20000, speed: 75, name: "tankboss" };
+helpBtnEl.addEventListener("click", () => setHelpModal(true));
+helpModalCloseEl.addEventListener("click", () => setHelpModal(false));
+helpModalScrimEl.addEventListener("click", () => setHelpModal(false));
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    setWaveDrawer(false);
+    setHelpModal(false);
+  }
+});
 
 // Valve's standard tank WaveSpawn wires these three. Only boss_deploy_relay
 // actually exists in the stock maps; the other two are convention, and an
@@ -58,199 +116,106 @@ const TANK_SPAWN_RELAY = "boss_spawn_relay";
 const TANK_KILLED_RELAY = "boss_dead_relay";
 const TANK_BOMB_RELAY = "boss_deploy_relay";
 
-function isTankSlot(slot) {
-  return Boolean(slot && slot.template === TANK_TEMPLATE);
-}
-
-// A slot holds the chosen template plus the per-robot overrides written into
-// its TFBot block. Skill and AlwaysCrit are seeded from the template itself
-// when a robot is dropped in (see adoptTemplateDefaults), so a Giant Soldier
-// keeps its Expert skill instead of being silently reset to Normal.
-function createRobotSlot(template) {
-  return {
-    template: template || null,
-    skill: "Normal",
-    alwaysCrit: false,
-    tank: { ...TANK_DEFAULTS, node: "" },
-  };
-}
-
-function normalizeRobotSlot(value) {
-  // Saves written before slots became objects stored a bare template name and
-  // carry no overrides, so they are flagged to be seeded from their template
-  // once the template bodies have loaded.
-  if (typeof value === "string") {
-    const legacy = createRobotSlot(value);
-    legacy.pendingDefaults = true;
-    return legacy;
-  }
-  if (!value || typeof value !== "object") return createRobotSlot(null);
-  const tank = value.tank && typeof value.tank === "object" ? value.tank : {};
-  const slot = {
-    template: typeof value.template === "string" ? value.template : null,
-    skill: SKILLS.includes(value.skill) ? value.skill : "Normal",
-    alwaysCrit: Boolean(value.alwaysCrit),
-    tank: {
-      health: Number.isFinite(tank.health) ? tank.health : TANK_DEFAULTS.health,
-      speed: Number.isFinite(tank.speed) ? tank.speed : TANK_DEFAULTS.speed,
-      name: typeof tank.name === "string" ? tank.name : TANK_DEFAULTS.name,
-      node: typeof tank.node === "string" ? tank.node : "",
-    },
-  };
-  if (value.pendingDefaults) slot.pendingDefaults = true;
-  return slot;
-}
-
-function createWaveSpawn() {
-  return {
-    name: "",
-    where: "",
-    totalCurrency: 100,
-    waitForAllDead: false,
-    waitForAllDeadName: "",
-    waitForAllSpawned: false,
-    waitForAllSpawnedName: "",
-    spawnCount: 1,
-    maxActive: 1,
-    totalCount: 1,
-    waitBetweenSpawns: 1,
-    waitBeforeStarting: 0,
-    squad: false,
-    robots: [createRobotSlot()],
-    activeSlot: 0,
-  };
-}
-
-function createWave() {
-  return { waveSpawns: [createWaveSpawn()], activeWaveSpawnIndex: 0 };
-}
-
-function createMission(beginAtWave) {
-  return {
-    where: "",
-    teleportWhere: "",
-    beginAtWave,
-    runForThisManyWaves: 1,
-    cooldownTime: 1,
-    desiredCount: 1,
-    robots: [createRobotSlot()],
-    activeSlot: 0,
-  };
-}
-
-let waves = [createWave()];
-let activeWaveIndex = 0;
-let missions = [];
-let activeMissionIndex = 0;
-let activeTabType = "wave"; // "wave" | "mission"
-let mapsByName = {};
-let robotGroups = [];
-let robotIconByName = {};
-let robotTemplateByName = {};
-let activeRobotTabIndex = 0;
-let missingTemplates = [];
-// Read off the selected map's .bsp. The relays fill the two inputs'
-// placeholders (a typed value overrides them); the tank paths populate the
-// Starting Path Track Node dropdown.
-let detectedRelays = { start: "", done: "" };
-let tankPaths = [];
-const mapInfoByMap = {};
-
-// --- Persistence -----------------------------------------------------------
-// The whole editor state lives in localStorage so a refresh picks up where the
-// user left off. Saved waves/missions are merged onto freshly created defaults
-// so states written before a field existed still load.
+// --- Store -------------------------------------------------------------
+// Everything the user actually edits (settings, waves, missions, which
+// tab/slot is active, imported templates) lives in one store object,
+// mutated only through store.commit(recipe, opts). opts.undoable (default
+// true) snapshots the state before the recipe runs, so undo/redo works for
+// free; opts.affects lists which render function(s) the change needs, so the
+// batching subscriber below can collapse many commits into one repaint.
+//
+// Reference/library data (maps, robot templates/icons, tank paths, detected
+// relays) is NOT here -- it's owned by robotLibrary.js/mapLibrary.js, rebuilt
+// wholesale on map/robot load, and has no business on the undo stack.
 const STORAGE_KEY = "tf2-popfile-generator/state";
-let savedMapName = null;
-let saveTimer = null;
 
-function scheduleSave() {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(saveState, 200);
+function defaultSettings() {
+  return {
+    missionName: "MyMission",
+    startingMoney: "400",
+    respawnWaveTime: "6",
+    difficulty: "normal",
+    map: "",
+    canBotsAttackInSpawnRoom: false,
+    halloween: false,
+    fixedRespawnWaveTime: false,
+    sentryBusterDamage: "",
+    sentryBusterKills: "",
+    advancedFlag: "",
+    waveStartRelay: "",
+    waveDoneRelay: "",
+  };
 }
 
-function saveState() {
-  clearTimeout(saveTimer);
-  try {
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({
-        settings: {
-          missionName: missionNameEl.value,
-          startingMoney: startingMoneyEl.value,
-          respawnWaveTime: respawnWaveTimeEl.value,
-          difficulty: difficultyEl.value,
-          map: mapSelectEl.value,
-          canBotsAttackInSpawnRoom: canBotsAttackInSpawnRoomEl.checked,
-          halloween: halloweenEl.checked,
-          fixedRespawnWaveTime: fixedRespawnWaveTimeEl.checked,
-          sentryBusterDamage: sentryBusterDamageEl.value,
-          sentryBusterKills: sentryBusterKillsEl.value,
-          advancedFlag: advancedFlagEl.value,
-          waveStartRelay: waveStartRelayEl.value,
-          waveDoneRelay: waveDoneRelayEl.value,
-        },
-        waves,
-        missions,
-        activeWaveIndex,
-        activeMissionIndex,
-        activeTabType,
-      })
-    );
-  } catch (err) {
-    // Storage unavailable (private mode, quota) — editing still works.
-  }
+function readSettingsFromDom() {
+  return {
+    missionName: missionNameEl.value,
+    startingMoney: startingMoneyEl.value,
+    respawnWaveTime: respawnWaveTimeEl.value,
+    difficulty: difficultyEl.value,
+    map: mapSelectEl.value,
+    canBotsAttackInSpawnRoom: canBotsAttackInSpawnRoomEl.checked,
+    halloween: halloweenEl.checked,
+    fixedRespawnWaveTime: fixedRespawnWaveTimeEl.checked,
+    sentryBusterDamage: sentryBusterDamageEl.value,
+    sentryBusterKills: sentryBusterKillsEl.value,
+    advancedFlag: advancedFlagEl.value,
+    waveStartRelay: waveStartRelayEl.value,
+    waveDoneRelay: waveDoneRelayEl.value,
+  };
 }
 
-function mergeDefaults(defaults, saved) {
-  if (!saved || typeof saved !== "object") return defaults;
-  const out = { ...defaults };
-  Object.keys(defaults).forEach((key) => {
-    if (saved[key] !== undefined && saved[key] !== null) out[key] = saved[key];
-  });
-  if (Array.isArray(out.robots)) {
-    out.robots = out.robots.map(normalizeRobotSlot);
-  }
-  if (!Array.isArray(out.robots) || !out.robots.length) out.robots = [createRobotSlot()];
-  out.activeSlot = clampIndex(out.activeSlot, out.robots.length);
-  return out;
-}
-
-function clampIndex(index, length) {
-  const n = Number(index);
-  if (!Number.isInteger(n) || n < 0 || n >= length) return 0;
-  return n;
-}
-
-function loadState() {
-  let saved;
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
-    saved = JSON.parse(raw);
-  } catch (err) {
-    return;
-  }
-  if (!saved || typeof saved !== "object") return;
-
-  const settings = saved.settings || {};
-  if (typeof settings.missionName === "string") missionNameEl.value = settings.missionName;
-  if (typeof settings.startingMoney === "string") startingMoneyEl.value = settings.startingMoney;
-  if (typeof settings.respawnWaveTime === "string") respawnWaveTimeEl.value = settings.respawnWaveTime;
-  if (typeof settings.difficulty === "string") difficultyEl.value = settings.difficulty;
+// map's <select> population/value is owned by loadMaps(), so it's skipped
+// here -- everything else mirrors the store into the visible inputs.
+function writeSettingsToDom(settings) {
+  missionNameEl.value = settings.missionName;
+  startingMoneyEl.value = settings.startingMoney;
+  respawnWaveTimeEl.value = settings.respawnWaveTime;
+  difficultyEl.value = settings.difficulty;
   canBotsAttackInSpawnRoomEl.checked = Boolean(settings.canBotsAttackInSpawnRoom);
   halloweenEl.checked = Boolean(settings.halloween);
   fixedRespawnWaveTimeEl.checked = Boolean(settings.fixedRespawnWaveTime);
-  if (typeof settings.sentryBusterDamage === "string") sentryBusterDamageEl.value = settings.sentryBusterDamage;
-  if (typeof settings.sentryBusterKills === "string") sentryBusterKillsEl.value = settings.sentryBusterKills;
-  if (typeof settings.advancedFlag === "string") advancedFlagEl.value = settings.advancedFlag;
-  if (typeof settings.waveStartRelay === "string") waveStartRelayEl.value = settings.waveStartRelay;
-  if (typeof settings.waveDoneRelay === "string") waveDoneRelayEl.value = settings.waveDoneRelay;
-  // The map <select> is still empty here; loadMaps() applies this once filled.
-  savedMapName = typeof settings.map === "string" ? settings.map : null;
+  sentryBusterDamageEl.value = settings.sentryBusterDamage;
+  sentryBusterKillsEl.value = settings.sentryBusterKills;
+  advancedFlagEl.value = settings.advancedFlag;
+  waveStartRelayEl.value = settings.waveStartRelay;
+  waveDoneRelayEl.value = settings.waveDoneRelay;
+}
+
+// Turns a saved JSON blob (from either localStorage or the IndexedDB
+// fallback -- same shape either way) into a store-ready state object. Pure:
+// no DOM writes, so it's safe to call both for the synchronous first-paint
+// path and for a late IndexedDB hit that arrives after the UI is already up.
+function stateFromSaved(saved) {
+  const state = {
+    settings: defaultSettings(),
+    waves: [createWave()],
+    missions: [],
+    activeWaveIndex: 0,
+    activeMissionIndex: 0,
+    activeTabType: "wave",
+    importedTemplates: {},
+  };
+
+  if (!saved || typeof saved !== "object") return { state, savedMapName: null };
+
+  const s = saved.settings || {};
+  if (typeof s.missionName === "string") state.settings.missionName = s.missionName;
+  if (typeof s.startingMoney === "string") state.settings.startingMoney = s.startingMoney;
+  if (typeof s.respawnWaveTime === "string") state.settings.respawnWaveTime = s.respawnWaveTime;
+  if (typeof s.difficulty === "string") state.settings.difficulty = s.difficulty;
+  state.settings.canBotsAttackInSpawnRoom = Boolean(s.canBotsAttackInSpawnRoom);
+  state.settings.halloween = Boolean(s.halloween);
+  state.settings.fixedRespawnWaveTime = Boolean(s.fixedRespawnWaveTime);
+  if (typeof s.sentryBusterDamage === "string") state.settings.sentryBusterDamage = s.sentryBusterDamage;
+  if (typeof s.sentryBusterKills === "string") state.settings.sentryBusterKills = s.sentryBusterKills;
+  if (typeof s.advancedFlag === "string") state.settings.advancedFlag = s.advancedFlag;
+  if (typeof s.waveStartRelay === "string") state.settings.waveStartRelay = s.waveStartRelay;
+  if (typeof s.waveDoneRelay === "string") state.settings.waveDoneRelay = s.waveDoneRelay;
+  const savedMapName = typeof s.map === "string" ? s.map : null;
 
   if (Array.isArray(saved.waves) && saved.waves.length) {
-    waves = saved.waves.map((wave) => {
+    state.waves = saved.waves.map((wave) => {
       const spawns = Array.isArray(wave && wave.waveSpawns) && wave.waveSpawns.length
         ? wave.waveSpawns.map((spawn) => mergeDefaults(createWaveSpawn(), spawn))
         : [createWaveSpawn()];
@@ -262,126 +227,327 @@ function loadState() {
   }
 
   if (Array.isArray(saved.missions)) {
-    missions = saved.missions.map((mission) =>
-      mergeDefaults(createMission(activeWaveIndex + 1), mission)
+    state.missions = saved.missions.map((mission) =>
+      mergeDefaults(createMission(state.activeWaveIndex + 1), mission)
     );
   }
 
-  activeWaveIndex = clampIndex(saved.activeWaveIndex, waves.length);
-  activeMissionIndex = clampIndex(saved.activeMissionIndex, Math.max(missions.length, 1));
-  activeTabType = saved.activeTabType === "mission" && missions.length ? "mission" : "wave";
+  state.activeWaveIndex = clampIndex(saved.activeWaveIndex, state.waves.length);
+  state.activeMissionIndex = clampIndex(saved.activeMissionIndex, Math.max(state.missions.length, 1));
+  state.activeTabType = saved.activeTabType === "mission" && state.missions.length ? "mission" : "wave";
+
+  if (saved.importedTemplates && typeof saved.importedTemplates === "object") {
+    state.importedTemplates = saved.importedTemplates;
+  }
+
+  return { state, savedMapName };
 }
 
-[
-  missionNameEl,
-  startingMoneyEl,
-  respawnWaveTimeEl,
-  difficultyEl,
-  mapSelectEl,
-  canBotsAttackInSpawnRoomEl,
-  halloweenEl,
-  fixedRespawnWaveTimeEl,
-  sentryBusterDamageEl,
-  sentryBusterKillsEl,
-  advancedFlagEl,
-  waveStartRelayEl,
-  waveDoneRelayEl,
-].forEach((el) => {
-  el.addEventListener("input", scheduleSave);
-  el.addEventListener("change", scheduleSave);
+const savedLocal = loadFromLocalStorage(STORAGE_KEY);
+const { state: initialState, savedMapName } = stateFromSaved(savedLocal);
+const store = createStore(initialState);
+writeSettingsToDom(store.getState().settings);
+
+// The common case (localStorage already has the mission) never touches
+// IndexedDB and stays fully synchronous. Only when localStorage came back
+// empty -- e.g. a previous save was too large and only made it into
+// IndexedDB -- does this pay the async cost, applying what it finds as one
+// bulk commit after the UI has already painted with defaults.
+if (!savedLocal) {
+  loadFromIndexedDbFallback(STORAGE_KEY).then((savedIdb) => {
+    if (!savedIdb) return;
+    const { state: restored } = stateFromSaved(savedIdb);
+    store.commit(
+      (state) => {
+        Object.assign(state, restored);
+      },
+      { affects: ["render", "robotList"] }
+    );
+    resyncFromStore();
+    statusEl.textContent = "Restored your last mission from backup.";
+  });
+}
+
+// `waves`/`missions`/`importedTemplates` alias the same objects store.getState()
+// holds -- mutating them in place (push/splice/field edits) mutates the live
+// store state too, so most commits don't need to touch `state` at all. Only a
+// wholesale replace (import, random mission, undo/redo) reassigns these, and
+// each of those call sites keeps the alias and the store's copy pointed at
+// the same object so no separate resync step is needed.
+let waves = store.getState().waves;
+let missions = store.getState().missions;
+let importedTemplates = store.getState().importedTemplates;
+
+// activeWaveIndex/activeMissionIndex/activeTabType are primitives, so they
+// can't be aliased -- read/write them through the store directly everywhere.
+function getActiveWaveIndex() {
+  return store.getState().activeWaveIndex;
+}
+function getActiveMissionIndex() {
+  return store.getState().activeMissionIndex;
+}
+function getActiveTabType() {
+  return store.getState().activeTabType;
+}
+
+// After undo/redo the store swaps in a whole different snapshot -- resync the
+// aliases and the settings inputs so the rest of the app sees the restored
+// data instead of stale references.
+function resyncFromStore() {
+  const state = store.getState();
+  waves = state.waves;
+  missions = state.missions;
+  importedTemplates = state.importedTemplates;
+  writeSettingsToDom(state.settings);
+}
+
+// --- Persistence -------------------------------------------------------
+let saveTimer = null;
+
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveState, 200);
+}
+
+function saveState() {
+  clearTimeout(saveTimer);
+  try {
+    const s = store.getState();
+    saveToStorage(STORAGE_KEY, {
+      settings: s.settings,
+      waves: s.waves,
+      missions: s.missions,
+      activeWaveIndex: s.activeWaveIndex,
+      activeMissionIndex: s.activeMissionIndex,
+      activeTabType: s.activeTabType,
+      importedTemplates: s.importedTemplates,
+    });
+  } catch (err) {
+    // Storage unavailable (private mode, quota, and the IndexedDB fallback
+    // also failed) — editing still works, it just won't survive a reload.
+  }
+}
+
+// --- Render batching -----------------------------------------------------
+// Every commit carries an `affects` list. Rather than re-render on each one
+// individually, accumulate them and flush once per animation frame, so a
+// burst of commits (random-mission generation, an import) repaints once.
+let pendingAffects = new Set();
+let renderScheduled = false;
+
+function scheduleRender(affects) {
+  affects.forEach((a) => pendingAffects.add(a));
+  if (renderScheduled) return;
+  renderScheduled = true;
+  requestAnimationFrame(() => {
+    renderScheduled = false;
+    const affectsNow = pendingAffects;
+    pendingAffects = new Set();
+    flushRender(affectsNow);
+  });
+}
+
+function flushRender(affects) {
+  if (affects.has("all") || affects.has("render")) {
+    render();
+  } else if (affects.has("waveSpawns")) {
+    renderWaveSpawns(); // also repaints the wave bar at its end
+  } else if (affects.has("waveBar")) {
+    renderWaveBar();
+  }
+  // render()/renderWaveSpawns() don't repaint the robot picker themselves, so
+  // it needs its own call whenever a commit says it changed.
+  if (affects.has("robotList")) {
+    renderRobotList();
+  }
+}
+
+function updateUndoRedoButtons() {
+  undoBtnEl.disabled = !store.canUndo();
+  redoBtnEl.disabled = !store.canRedo();
+}
+
+store.subscribe((affects) => {
+  scheduleRender(affects);
+  scheduleSave();
+  updateUndoRedoButtons();
+});
+updateUndoRedoButtons();
+
+// A snapshot captures activeWaveIndex/activeMissionIndex/activeTabType as
+// they were at commit time too, since they live on the same state object as
+// the data. But navigation isn't supposed to be on the undo timeline at all
+// -- restoring a snapshot verbatim would otherwise silently also "undo"
+// whichever tab the user has since clicked to. So undo/redo restore the data
+// from the snapshot but keep wherever the user currently is, just re-clamped
+// in case the restored waves/missions are now a different length.
+function captureNav() {
+  const s = store.getState();
+  return {
+    activeWaveIndex: s.activeWaveIndex,
+    activeMissionIndex: s.activeMissionIndex,
+    activeTabType: s.activeTabType,
+  };
+}
+
+function restoreNav(nav) {
+  const s = store.getState();
+  s.activeWaveIndex = clampIndex(nav.activeWaveIndex, s.waves.length);
+  s.activeMissionIndex = clampIndex(nav.activeMissionIndex, Math.max(s.missions.length, 1));
+  s.activeTabType = nav.activeTabType === "mission" && s.missions.length ? "mission" : "wave";
+}
+
+function performUndo() {
+  const nav = captureNav();
+  if (!store.undo()) return;
+  restoreNav(nav);
+  resyncFromStore();
+}
+function performRedo() {
+  const nav = captureNav();
+  if (!store.redo()) return;
+  restoreNav(nav);
+  resyncFromStore();
+}
+
+undoBtnEl.addEventListener("click", performUndo);
+redoBtnEl.addEventListener("click", performRedo);
+
+document.addEventListener("keydown", (e) => {
+  const key = e.key.toLowerCase();
+  if (!(e.ctrlKey || e.metaKey)) return;
+  if (key === "z" && !e.shiftKey) {
+    e.preventDefault();
+    performUndo();
+  } else if (key === "y" || (key === "z" && e.shiftKey)) {
+    e.preventDefault();
+    performRedo();
+  }
 });
 
-// Starting Currency is echoed above the wave bars.
-startingMoneyEl.addEventListener("input", renderWaveBar);
-
-loadState();
-
-// Tab order follows this list.
-const ROBOT_SOURCES = [
-  { file: "templates/robot_standard.pop", label: "Common", requiresGatebot: false },
-  { file: "templates/robot_minigiant.pop", label: "Minigiants", requiresGatebot: false },
-  { file: "templates/robot_giant.pop", label: "Giant", requiresGatebot: false },
-  { file: "templates/robot_boss.pop", label: "Boss", requiresGatebot: false },
-  { file: "templates/robot_standard_support.pop", label: "Support", requiresGatebot: false },
-  { file: "templates/robot_gatebot.pop", label: "Gatebot", requiresGatebot: true },
+// --- Settings inputs -------------------------------------------------------
+// Plain field edits never render anything (matches every generic field
+// before this refactor); startingMoney is the one exception, since the wave
+// bar echoes it live.
+const SETTINGS_FIELDS = [
+  [missionNameEl, "missionName", false, []],
+  [startingMoneyEl, "startingMoney", false, ["waveBar"]],
+  [respawnWaveTimeEl, "respawnWaveTime", false, []],
+  [difficultyEl, "difficulty", false, []],
+  [mapSelectEl, "map", false, []],
+  [canBotsAttackInSpawnRoomEl, "canBotsAttackInSpawnRoom", true, []],
+  [halloweenEl, "halloween", true, []],
+  [fixedRespawnWaveTimeEl, "fixedRespawnWaveTime", true, []],
+  [sentryBusterDamageEl, "sentryBusterDamage", false, []],
+  [sentryBusterKillsEl, "sentryBusterKills", false, []],
+  [advancedFlagEl, "advancedFlag", false, []],
+  [waveStartRelayEl, "waveStartRelay", false, []],
+  [waveDoneRelayEl, "waveDoneRelay", false, []],
 ];
 
-// Which tabs the robot picker offers depends on what is being filled in: a
-// WaveSpawn takes wave robots, a Mission takes support robots.
-const WAVE_ROBOT_TABS = ["Common", "Minigiants", "Giant", "Boss", "Gatebot"];
-const MISSION_ROBOT_TABS = ["Support", "Gatebot"];
+SETTINGS_FIELDS.forEach(([el, key, isCheckbox, affects]) => {
+  let snapshotted = false;
+  const commitField = () => {
+    const value = isCheckbox ? el.checked : el.value;
+    store.commit(
+      (state) => {
+        state.settings[key] = value;
+      },
+      { undoable: !snapshotted, affects }
+    );
+    snapshotted = true;
+  };
+  el.addEventListener("input", commitField);
+  el.addEventListener("change", commitField);
+  el.addEventListener("blur", () => {
+    snapshotted = false;
+  });
+});
 
-// Templates that belong in Support regardless of the file they live in (the
-// Sentry Buster sits in robot_giant.pop but is only ever used via a
-// DestroySentries Mission).
-const SUPPORT_TEMPLATES = ["T_TFBot_SentryBuster"];
+loadMaps().then(() => {
+  loadRobots();
+  refreshMapInfo();
+});
+mapSelectEl.addEventListener("change", () => {
+  // The manifest's gatebot flag is per-map; a session-only override doesn't
+  // carry over to a different map, so it resets rather than sticking.
+  gatebotOverrideEl.checked = false;
+  loadRobots();
+  refreshMapInfo();
+});
+gatebotOverrideEl.addEventListener("change", () => loadRobots());
 
-// Whole classes that are only ever used as support. Engineers are still defined
-// in robot_standard.pop, but they belong under Support, not Common.
-const SUPPORT_ONLY_CLASSES = ["engineer"];
-
-// Every robot list is grouped by class in this order.
-const CLASS_ORDER = [
-  "scout",
-  "soldier",
-  "pyro",
-  "demoman",
-  "heavyweapons",
-  "engineer",
-  "medic",
-  "sniper",
-  "spy",
-];
-
-// The .pop files spell a few classes more than one way.
-const CLASS_ALIASES = { demo: "demoman", heavy: "heavyweapons" };
-
-// The slots that actually carry a robot, in slot order.
-function filledSlots(spawn) {
-  return spawn.robots.filter((slot) => slot && slot.template);
+async function loadMaps() {
+  const result = await loadMapLibrary(mapSelectEl, savedMapName);
+  if (result.error) {
+    statusEl.textContent = `Couldn't load the map list (${result.error}).`;
+  }
 }
 
-// Seeds a slot's overrides from the template it was just given, so the form
-// shows what the robot really is rather than a blanket "Normal".
-function adoptTemplateDefaults(slot) {
-  if (!slot || !slot.template) return;
-  const body = robotTemplateByName[slot.template];
-  const skill = body ? findEntry(body, "Skill") : undefined;
-  slot.skill = SKILLS.includes(skill) ? skill : "Normal";
-  const meta = robotIconByName[slot.template];
-  slot.alwaysCrit = Boolean(meta && meta.crit);
+async function refreshMapInfo() {
+  const mapName = mapSelectEl.value;
+  if (!mapName) return;
+
+  if (!getMapInfoByMap()[mapName]) {
+    waveStartRelayEl.placeholder = "reading map...";
+    waveDoneRelayEl.placeholder = "reading map...";
+  }
+
+  const info = await refreshMapInfoLibrary(mapName);
+
+  // The map may have been changed again while the .bsp was in flight.
+  if (mapSelectEl.value !== mapName) return;
+
+  detectedRelays = info.relays;
+  tankPaths = info.tankPaths;
+  waveStartRelayEl.placeholder = detectedRelays.start || "none found in map";
+  waveDoneRelayEl.placeholder = detectedRelays.done || "none found in map";
+  if (info.error) {
+    statusEl.textContent = `Couldn't read mvm_${mapName}.bsp (${info.error}) — relay/tank-path detection unavailable. Reselect the map to retry.`;
+  }
+
+  // The tank path dropdown, and whether the Tank is offered at all, can only be
+  // settled once the .bsp has been read. Not a store commit -- library data
+  // changed, not mission data -- so it renders directly.
+  render();
+  renderRobotList();
 }
 
-// A Tank is not a bot: it cannot be squadded, and a WaveSpawn carries exactly
-// one. Dropping one in collapses the WaveSpawn to that single slot.
-function applyTankConstraints(spawn) {
-  if (!spawn || spawn.squad === undefined) return;
+// Read off the selected map's .bsp. The relays fill the two inputs'
+// placeholders (a typed value overrides them); the tank paths populate the
+// Starting Path Track Node dropdown.
+let detectedRelays = { start: "", done: "" };
+let tankPaths = [];
 
-  const tank = spawn.robots.find(isTankSlot);
-  if (!tank) return;
+async function loadRobots() {
+  robotListEl.innerHTML = `<p class="robot-list-empty">Loading robots...</p>`;
 
-  spawn.squad = false;
-  spawn.robots = [tank];
-  spawn.activeSlot = 0;
+  const selectedMap = getMapsByName()[mapSelectEl.value];
+  // The manifest's per-map flag is usually right, but a community map the
+  // manifest hasn't been updated for yet can still support Gatebot -- the
+  // checkbox lets a user turn the tab on for this session without editing
+  // maps/manifest.json.
+  const supportsGatebot = Boolean((selectedMap && selectedMap.gatebot) || gatebotOverrideEl.checked);
+
+  await loadRobotLibrary(supportsGatebot, importedTemplates);
+
+  activeRobotTabIndex = 0;
+  applyPendingSlotDefaults();
+
+  // Everything drawn before this point was drawn without template metadata:
+  // the first render() runs synchronously at startup while this fetch is still
+  // in flight, so a restored save had no icons, no giant/crit styling and no
+  // derived Skill. Repaint now that robotIconByName is populated. Not a store
+  // commit -- library data changed, not mission data.
+  render();
+  renderRobotList();
 }
 
-// Giants (Attributes MiniBoss) are fixed-skill by design, so their Skill is
-// shown but not editable.
-function isGiantTemplate(name) {
-  const meta = robotIconByName[name];
-  return Boolean(meta && meta.giant);
-}
-
-// A template that already declares AlwaysCrit can never have it taken away by
-// the TFBot block, so the toggle is shown ticked but locked rather than
-// pretending it can be turned off.
-function templateAlwaysCrits(name) {
-  const meta = robotIconByName[name];
-  return Boolean(meta && meta.crit);
-}
-
-// Fills in overrides for slots restored from a save that predates them.
-// Returns whether anything changed, so the form can be redrawn.
+// Fills in overrides for slots restored from a save that predates them. This
+// is a one-time hydration of legacy data, not a deliberate user edit, so it
+// isn't pushed onto the undo stack -- it just mutates the same waves/missions
+// objects the store already holds, and schedules a save directly since no
+// commit fires to do that automatically.
 function applyPendingSlotDefaults() {
   const spawns = missions.concat(...waves.map((wave) => wave.waveSpawns));
   let changed = false;
@@ -395,252 +561,28 @@ function applyPendingSlotDefaults() {
     });
   });
 
+  if (changed) scheduleSave();
   return changed;
 }
 
-function normalizeClass(className) {
-  const c = (className || "").toLowerCase();
-  return CLASS_ALIASES[c] || c;
-}
-
-function classRank(name) {
-  const meta = robotIconByName[name];
-  const index = CLASS_ORDER.indexOf(meta ? meta.className : "");
-  return index === -1 ? CLASS_ORDER.length : index;
-}
-
-// Stable sort, so templates keep their file order within a class.
-function sortByClass(names) {
-  return names
-    .map((name, i) => ({ name, i }))
-    .sort((a, b) => classRank(a.name) - classRank(b.name) || a.i - b.i)
-    .map((entry) => entry.name);
-}
-
-loadMaps().then(() => {
-  loadRobots();
-  refreshMapInfo();
-});
-mapSelectEl.addEventListener("change", () => {
-  loadRobots();
-  refreshMapInfo();
-});
-
-async function loadMaps() {
-  try {
-    const res = await fetch("maps/manifest.json");
-    const maps = await res.json();
-
-    mapSelectEl.innerHTML = "";
-    mapsByName = {};
-
-    if (!maps.length) {
-      mapSelectEl.innerHTML = `<option value="" disabled selected>No maps available</option>`;
-      return;
-    }
-
-    maps.forEach((map, i) => {
-      mapsByName[map.name] = map;
-      const option = document.createElement("option");
-      option.value = map.name;
-      option.textContent = `mvm_${map.name}`;
-      if (i === 0) option.selected = true;
-      mapSelectEl.appendChild(option);
-    });
-
-    if (savedMapName && mapsByName[savedMapName]) {
-      mapSelectEl.value = savedMapName;
-    }
-  } catch (err) {
-    mapSelectEl.innerHTML = `<option value="" disabled selected>Failed to load maps</option>`;
-  }
-}
-
-async function refreshMapInfo() {
-  const mapName = mapSelectEl.value;
-  if (!mapName) return;
-
-  if (!mapInfoByMap[mapName]) {
-    waveStartRelayEl.placeholder = "reading map...";
-    waveDoneRelayEl.placeholder = "reading map...";
-    try {
-      const text = await readBspEntityLump(`maps/mvm_${mapName}.bsp`);
-      mapInfoByMap[mapName] = {
-        relays: findWaveRelays(bspRelayNames(text)),
-        tankPaths: findTankPathStarts(text),
-      };
-    } catch (err) {
-      mapInfoByMap[mapName] = { relays: { start: "", done: "" }, tankPaths: [] };
-    }
-  }
-
-  // The map may have been changed again while the .bsp was in flight.
-  if (mapSelectEl.value !== mapName) return;
-
-  const info = mapInfoByMap[mapName];
-  detectedRelays = info.relays;
-  tankPaths = info.tankPaths;
-  waveStartRelayEl.placeholder = detectedRelays.start || "none found in map";
-  waveDoneRelayEl.placeholder = detectedRelays.done || "none found in map";
-
-  // The tank path dropdown, and whether the Tank is offered at all, can only be
-  // settled once the .bsp has been read.
-  render();
-  renderRobotList();
-}
-
-async function loadRobots() {
-  robotListEl.innerHTML = `<p class="robot-list-empty">Loading robots...</p>`;
-
-  const selectedMap = mapsByName[mapSelectEl.value];
-  const supportsGatebot = Boolean(selectedMap && selectedMap.gatebot);
-
-  const sources = ROBOT_SOURCES.filter((s) => !s.requiresGatebot || supportsGatebot);
-
-  const fetched = await Promise.all(
-    sources.map(async (source) => {
-      try {
-        const res = await fetch(source.file);
-        const text = await res.text();
-        return { label: source.label, templates: extractTemplates(text) };
-      } catch (err) {
-        return { label: source.label, templates: [] };
-      }
-    })
-  );
-
-  robotIconByName = {};
-  robotTemplateByName = {};
-  const strays = [];
-  const groups = fetched.map(({ label, templates }) => {
-    const robots = [];
-    templates.forEach(({ name, className, classIcon, attributes, body }) => {
-      const attrs = attributes || [];
-      robotTemplateByName[name] = body || [];
-      robotIconByName[name] = {
-        candidates: iconCandidates(classIcon, className),
-        className: normalizeClass(className),
-        giant: attrs.includes("miniboss"),
-        crit: attrs.some((a) => a.startsWith("alwayscrit")),
-      };
-      const supportOnly =
-        SUPPORT_TEMPLATES.includes(name) ||
-        SUPPORT_ONLY_CLASSES.includes(normalizeClass(className));
-      if (supportOnly && label !== "Support") {
-        strays.push(name);
-      } else {
-        robots.push(name);
-      }
-    });
-    return { label, names: robots };
-  });
-
-  // The Engineers are defined in both robot_standard.pop and
-  // robot_standard_support.pop, so a name can arrive twice — list it once.
-  const supportGroup = groups.find((g) => g.label === "Support");
-  if (supportGroup) {
-    strays.forEach((name) => {
-      if (!supportGroup.names.includes(name)) supportGroup.names.push(name);
-    });
-  } else if (strays.length) {
-    groups.push({ label: "Support", names: [...new Set(strays)] });
-  }
-
-  groups.forEach((group) => {
-    group.names = sortByClass(group.names);
-  });
-
-  // Added after sorting so it heads the tab: the Tank has no class to sort by.
-  robotIconByName[TANK_TEMPLATE] = {
-    candidates: ["icons/leaderboard_class_tank.png"],
-    className: "",
-    giant: true,
-    crit: false,
-  };
-  const bossGroup = groups.find((g) => g.label === "Boss");
-  if (bossGroup) bossGroup.names.unshift(TANK_TEMPLATE);
-
-  robotGroups = groups;
-  activeRobotTabIndex = 0;
-  applyPendingSlotDefaults();
-
-  // Everything drawn before this point was drawn without template metadata:
-  // the first render() runs synchronously at startup while this fetch is still
-  // in flight, so a restored save had no icons, no giant/crit styling and no
-  // derived Skill. Repaint now that robotIconByName is populated.
-  render();
-  renderRobotList();
-}
-
-// Icon files are named leaderboard_class_<icon>.png, while ClassIcon values in
-// the .pop files omit that prefix. Giant variants (scout_giant, scout_stun_giant_armored)
-// have no file of their own and reuse the non-giant art, and templates with no
-// ClassIcon at all fall back to their Class's default icon.
-const CLASS_DEFAULT_ICON = {
-  scout: "scout",
-  soldier: "soldier",
-  pyro: "pyro",
-  demoman: "demo",
-  demo: "demo",
-  heavyweapons: "heavy",
-  heavy: "heavy",
-  engineer: "engineer",
-  medic: "medic",
-  sniper: "sniper",
-  spy: "spy",
-};
-
-function iconCandidates(classIcon, className) {
-  const names = [];
-  if (classIcon) {
-    names.push(classIcon);
-    if (classIcon.includes("_giant")) names.push(classIcon.replace("_giant", ""));
-    if (classIcon.endsWith("_g")) names.push(classIcon.slice(0, -2));
-  }
-  const fallback = CLASS_DEFAULT_ICON[(className || "").toLowerCase()];
-  if (fallback) names.push(fallback);
-
-  return [...new Set(names)].map((n) => `icons/leaderboard_class_${n}.png`);
-}
-
-// `alwaysCrit` overrides the template's own crit state, so a bot given
-// AlwaysCrit in its slot still gets the crit ring. Omit it to use the template.
-function robotIcon(name, alwaysCrit) {
-  const meta = robotIconByName[name];
-  const candidates = meta ? meta.candidates : null;
-  if (!candidates || !candidates.length) return null;
-
-  const crit = alwaysCrit === undefined ? meta.crit : alwaysCrit;
-  const img = document.createElement("img");
-  img.className =
-    "robot-icon" + (meta.giant ? " giant" : "") + (crit ? " crit" : "");
-  img.alt = "";
-
-  let index = 0;
-  img.src = candidates[index];
-  img.addEventListener("error", () => {
-    index += 1;
-    if (index < candidates.length) {
-      img.src = candidates[index];
-    } else {
-      img.remove();
-    }
-  });
-
-  return img;
-}
-
 let lastRobotContext = null;
+let activeRobotTabIndex = 0;
+
+// Which tabs the robot picker offers depends on what is being filled in: a
+// WaveSpawn takes wave robots, a Mission takes support robots.
+const WAVE_ROBOT_TABS = ["Common", "Minigiants", "Giant", "Boss", "Gatebot", "Imported"];
+const MISSION_ROBOT_TABS = ["Support", "Gatebot", "Imported"];
 
 function getVisibleRobotGroups() {
-  const allowed = activeTabType === "mission" ? MISSION_ROBOT_TABS : WAVE_ROBOT_TABS;
-  return robotGroups.filter((g) => allowed.includes(g.label));
+  const allowed = getActiveTabType() === "mission" ? MISSION_ROBOT_TABS : WAVE_ROBOT_TABS;
+  return getRobotGroups().filter((g) => allowed.includes(g.label));
 }
 
 function renderRobotTabs() {
-  if (lastRobotContext !== activeTabType) {
+  const tabType = getActiveTabType();
+  if (lastRobotContext !== tabType) {
     activeRobotTabIndex = 0;
-    lastRobotContext = activeTabType;
+    lastRobotContext = tabType;
   }
 
   const groups = getVisibleRobotGroups();
@@ -652,7 +594,10 @@ function renderRobotTabs() {
 
   groups.forEach((group, i) => {
     const tab = document.createElement("div");
-    tab.className = "robot-tab" + (i === activeRobotTabIndex ? " active" : "");
+    const rtActive = i === activeRobotTabIndex;
+    tab.className = "robot-tab" + (rtActive ? " active" : "");
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", String(rtActive));
     tab.textContent = group.label;
     tab.addEventListener("click", () => {
       activeRobotTabIndex = i;
@@ -700,9 +645,9 @@ function renderRobotList() {
     if (icon) item.appendChild(icon);
     const itemName = document.createElement("span");
     itemName.className = "robot-item-name";
-    itemName.textContent = name;
+    itemName.textContent = robotDisplayName(name);
     item.appendChild(itemName);
-    item.title = name;
+    item.title = robotDisplayName(name);
     item.draggable = true;
     item.addEventListener("click", () => selectRobot(name));
     item.addEventListener("dragstart", (e) => {
@@ -716,12 +661,12 @@ function renderRobotList() {
 }
 
 function getActiveRobotTarget() {
-  if (activeTabType === "wave") {
-    const wave = waves[activeWaveIndex];
+  if (getActiveTabType() === "wave") {
+    const wave = waves[getActiveWaveIndex()];
     return wave ? wave.waveSpawns[wave.activeWaveSpawnIndex] : null;
   }
-  if (activeTabType === "mission") {
-    return missions[activeMissionIndex] || null;
+  if (getActiveTabType() === "mission") {
+    return missions[getActiveMissionIndex()] || null;
   }
   return null;
 }
@@ -729,21 +674,27 @@ function getActiveRobotTarget() {
 function selectRobot(name) {
   const target = getActiveRobotTarget();
   if (!target) return;
-  const slot = target.robots[target.activeSlot];
-  slot.template = name;
-  adoptTemplateDefaults(slot);
-  applyTankConstraints(target);
-  syncSquadCount(target);
-  renderWaveSpawns();
-  renderRobotList();
+  store.commit(
+    () => {
+      const slot = target.robots[target.activeSlot];
+      slot.template = name;
+      adoptTemplateDefaults(slot);
+      applyTankConstraints(target);
+      syncSquadCount(target);
+    },
+    { affects: ["waveSpawns", "robotList"] }
+  );
 }
 
 document.getElementById("addWaveBtn").addEventListener("click", () => {
-  waves.push(createWave());
-  activeWaveIndex = waves.length - 1;
-  activeTabType = "wave";
-  render();
-  renderRobotList();
+  store.commit(
+    (state) => {
+      state.waves.push(createWave());
+      state.activeWaveIndex = state.waves.length - 1;
+      state.activeTabType = "wave";
+    },
+    { affects: ["render", "robotList"] }
+  );
 });
 
 document.getElementById("downloadBtn").addEventListener("click", () => {
@@ -764,39 +715,680 @@ document.getElementById("downloadBtn").addEventListener("click", () => {
 });
 
 function buildFileName() {
-  const mapName = mapSelectEl.value || "map";
-  const difficulty = difficultyEl.value || "normal";
-  const missionName = missionNameEl.value.trim() || "mission";
+  const settings = store.getState().settings;
+  const mapName = settings.map || "map";
+  const difficulty = settings.difficulty || "normal";
+  const missionName = settings.missionName.trim() || "mission";
 
   return `mvm_${mapName}_${difficulty}_${missionName}.pop`.toLowerCase();
 }
 
+// --- Import ------------------------------------------------------------
+// Parses a .pop file back into the editor's own state shape so a mission can
+// be re-opened for editing. Understands both what this tool writes and the
+// common hand-authored shape (Template-based TFBots, inline Squad/Tank blocks).
+
+importBtnEl.addEventListener("click", () => importFileInputEl.click());
+
+importFileInputEl.addEventListener("change", async () => {
+  const file = importFileInputEl.files[0];
+  importFileInputEl.value = ""; // allow re-picking the same file later
+  if (!file) return;
+
+  if (!window.confirm(`Import ${file.name}? This replaces the current mission.`)) {
+    return;
+  }
+
+  try {
+    const text = await file.text();
+    await importPopfile(text, file.name);
+    const notes = [];
+    if (missingCustomTemplates.length) {
+      notes.push(`no definition found for ${missingCustomTemplates.join(", ")}`);
+    }
+    if (importWarnings.length) {
+      notes.push(importWarnings.join("; "));
+    }
+    statusEl.textContent = notes.length
+      ? `Imported ${file.name} — ${notes.join(" — ")}`
+      : `Imported ${file.name}`;
+  } catch (err) {
+    statusEl.textContent = `Import failed: ${err.message}`;
+  }
+});
+
+let missingCustomTemplates = [];
+// Non-fatal: things the parser noticed but recovered from gracefully rather
+// than rejecting the whole file (an import is tolerant by design).
+let importWarnings = [];
+
+// A counter suffix keeps synthesized names unique within one import; reset
+// each time so re-importing the same file produces the same names.
+function uniqueTemplateName(base, taken) {
+  let name = base;
+  let n = 1;
+  while (taken.has(name)) {
+    n += 1;
+    name = `${base}_${n}`;
+  }
+  taken.add(name);
+  return name;
+}
+
+// A TFBot block that names a Template just points at it. One with no
+// Template (a raw Class/Skill/Attributes definition written inline) has no
+// name of its own, so one is made up and the whole block is kept as its body.
+function resolveTfBotTemplate(block, takenNames) {
+  const templateName = findEntry(block, "Template");
+  if (typeof templateName === "string" && templateName) return templateName;
+
+  const className = findEntry(block, "Class") || "Unknown";
+  const classIcon = findEntry(block, "ClassIcon");
+  const attributes = collectValues(block, "Attributes").map((a) => String(a).toLowerCase());
+  const name = uniqueTemplateName(`Custom_${className}`, takenNames);
+  importedTemplates[name] = { body: block, className, classIcon, attributes };
+  return name;
+}
+
+function buildSlotFromTfBotBlock(block, takenNames) {
+  const name = resolveTfBotTemplate(block, takenNames);
+  const slot = createRobotSlot(name);
+
+  const skill = findEntry(block, "Skill");
+  if (SKILLS.includes(skill)) {
+    slot.skill = skill;
+  } else {
+    // No explicit Skill on this TFBot -- a hand-written file can rely on the
+    // template's own default instead of restating it.
+    const templateBody = getRobotTemplateByName()[name] || (importedTemplates[name] || {}).body;
+    const templateSkill = templateBody ? findEntry(templateBody, "Skill") : undefined;
+    slot.skill = SKILLS.includes(templateSkill) ? templateSkill : "Normal";
+  }
+
+  slot.alwaysCrit = collectValues(block, "Attributes").some(
+    (a) => String(a).toLowerCase() === "alwayscrit"
+  );
+  return slot;
+}
+
+function parseTankBlock(tankBody) {
+  const slot = createRobotSlot(TANK_TEMPLATE);
+  const health = parseInt(findEntry(tankBody, "Health"), 10);
+  const speed = parseInt(findEntry(tankBody, "Speed"), 10);
+  const name = findEntry(tankBody, "Name");
+  const node = findEntry(tankBody, "StartingPathTrackNode");
+  slot.tank = {
+    health: Number.isFinite(health) ? health : TANK_DEFAULTS.health,
+    speed: Number.isFinite(speed) ? speed : TANK_DEFAULTS.speed,
+    name: typeof name === "string" ? name : TANK_DEFAULTS.name,
+    node: typeof node === "string" ? node : "",
+  };
+  return slot;
+}
+
+function parseIntOr(value, fallback) {
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function parseWaveSpawnBlock(entries, takenNames) {
+  const spawn = createWaveSpawn();
+  spawn.name = findEntry(entries, "Name") || "";
+
+  const waitDead = findEntry(entries, "WaitForAllDead");
+  if (waitDead !== undefined) {
+    spawn.waitForAllDead = true;
+    spawn.waitForAllDeadName = String(waitDead);
+  }
+  const waitSpawned = findEntry(entries, "WaitForAllSpawned");
+  if (waitSpawned !== undefined) {
+    spawn.waitForAllSpawned = true;
+    spawn.waitForAllSpawnedName = String(waitSpawned);
+  }
+
+  spawn.where = findEntry(entries, "Where") || "";
+  spawn.totalCurrency = parseIntOr(findEntry(entries, "TotalCurrency"), spawn.totalCurrency);
+  spawn.totalCount = parseIntOr(findEntry(entries, "TotalCount"), spawn.totalCount);
+  spawn.maxActive = parseIntOr(findEntry(entries, "MaxActive"), spawn.maxActive);
+  spawn.spawnCount = parseIntOr(findEntry(entries, "SpawnCount"), spawn.spawnCount);
+  spawn.waitBeforeStarting = parseIntOr(findEntry(entries, "WaitBeforeStarting"), spawn.waitBeforeStarting);
+  spawn.waitBetweenSpawns = parseIntOr(findEntry(entries, "WaitBetweenSpawns"), spawn.waitBetweenSpawns);
+
+  const tank = findEntry(entries, "Tank");
+  const squad = findEntry(entries, "Squad");
+  const tfbot = findEntry(entries, "TFBot");
+
+  if (Array.isArray(tank)) {
+    spawn.squad = false;
+    spawn.robots = [parseTankBlock(tank)];
+  } else if (Array.isArray(squad)) {
+    spawn.squad = true;
+    const bots = squad.filter(([k]) => k.toLowerCase() === "tfbot").map(([, v]) => v);
+    spawn.robots = bots.length
+      ? bots.map((b) => buildSlotFromTfBotBlock(b, takenNames))
+      : [createRobotSlot()];
+  } else if (Array.isArray(tfbot)) {
+    spawn.squad = false;
+    spawn.robots = [buildSlotFromTfBotBlock(tfbot, takenNames)];
+  } else {
+    importWarnings.push(
+      `WaveSpawn "${spawn.name.trim() || "(unnamed)"}" has no Tank/Squad/TFBot block — left with an empty slot`
+    );
+  }
+
+  spawn.activeSlot = 0;
+  return spawn;
+}
+
+function parseWaveBlock(entries, takenNames) {
+  const spawnBlocks = entries.filter(([k]) => k.toLowerCase() === "wavespawn").map(([, v]) => v);
+  const waveSpawns = spawnBlocks.length
+    ? spawnBlocks.map((b) => parseWaveSpawnBlock(b, takenNames))
+    : [createWaveSpawn()];
+  return { waveSpawns, activeWaveSpawnIndex: 0 };
+}
+
+function parseMissionBlock(entries, takenNames) {
+  const mission = createMission(parseIntOr(findEntry(entries, "BeginAtWave"), 1));
+  mission.where = findEntry(entries, "Where") || "";
+  mission.teleportWhere = findEntry(entries, "TeleportWhere") || "";
+  mission.runForThisManyWaves = parseIntOr(findEntry(entries, "RunForThisManyWaves"), 1);
+  mission.cooldownTime = parseIntOr(findEntry(entries, "CooldownTime"), 1);
+  mission.desiredCount = parseIntOr(findEntry(entries, "DesiredCount"), 1);
+
+  const tfbot = findEntry(entries, "TFBot");
+  mission.robots = Array.isArray(tfbot) ? [buildSlotFromTfBotBlock(tfbot, takenNames)] : [createRobotSlot()];
+  mission.activeSlot = 0;
+  return mission;
+}
+
+const DIFFICULTY_VALUES = ["normal", "intermediate", "advanced", "expert"];
+
+// Recovers map/difficulty/mission name from the filename convention this tool
+// writes (mvm_<map>_<difficulty>_<name>.pop) -- the .pop body itself carries
+// none of the three.
+function parsePopFilename(filename) {
+  const base = filename.replace(/\.pop$/i, "");
+  const parts = base.split("_");
+  if (!parts.length || parts[0].toLowerCase() !== "mvm") return {};
+
+  const rest = parts.slice(1);
+  const diffIndex = rest.findIndex((p) => DIFFICULTY_VALUES.includes(p.toLowerCase()));
+  if (diffIndex <= 0) return {};
+
+  return {
+    mapName: rest.slice(0, diffIndex).join("_"),
+    difficulty: rest[diffIndex].toLowerCase(),
+    missionName: rest.slice(diffIndex + 1).join("_"),
+  };
+}
+
+async function importPopfile(text, filename) {
+  const root = parsePop(text);
+  const schedule = findEntry(root, "WaveSchedule");
+  if (!Array.isArray(schedule)) {
+    throw new Error("no WaveSchedule block found");
+  }
+
+  const waveBlocks = schedule.filter(([k]) => k.toLowerCase() === "wave").map(([, v]) => v);
+  if (!waveBlocks.length) {
+    throw new Error("no Wave blocks found");
+  }
+  const missionBlocks = schedule.filter(([k]) => k.toLowerCase() === "mission").map(([, v]) => v);
+
+  // Fresh per import: names must stay stable within this file's own Custom_*
+  // bots but nothing here needs to survive across separate imports.
+  importedTemplates = {};
+  importWarnings = [];
+  const takenNames = new Set();
+
+  // The file's own Templates block, if it has one, takes priority over
+  // whatever this session already knew about a template with the same name.
+  extractTemplates(text).forEach((t) => {
+    importedTemplates[t.name] = {
+      body: t.body,
+      className: t.className,
+      classIcon: t.classIcon,
+      attributes: t.attributes,
+    };
+    takenNames.add(t.name);
+  });
+
+  const newWaves = waveBlocks.map((b) => parseWaveBlock(b, takenNames));
+  const newMissions = missionBlocks.map((b) => parseMissionBlock(b, takenNames));
+
+  const startingCurrency = findEntry(schedule, "StartingCurrency");
+  if (startingCurrency !== undefined) startingMoneyEl.value = startingCurrency;
+  const respawnWaveTime = findEntry(schedule, "RespawnWaveTime");
+  if (respawnWaveTime !== undefined) respawnWaveTimeEl.value = respawnWaveTime;
+  const canAttack = findEntry(schedule, "CanBotsAttackWhileInSpawnRoom");
+  canBotsAttackInSpawnRoomEl.checked = String(canAttack).toLowerCase() === "yes";
+  halloweenEl.checked = String(findEntry(schedule, "EventPopfile")).toLowerCase() === "halloween";
+  fixedRespawnWaveTimeEl.checked = ["yes", "1", "true"].includes(
+    String(findEntry(schedule, "FixedRespawnWaveTime")).toLowerCase()
+  );
+  const sentryDamage = findEntry(schedule, "AddSentryBusterWhenDamageDealtExceeds");
+  sentryBusterDamageEl.value = sentryDamage !== undefined ? sentryDamage : "";
+  const sentryKills = findEntry(schedule, "AddSentryBusterWhenKillCountExceeds");
+  sentryBusterKillsEl.value = sentryKills !== undefined ? sentryKills : "";
+  const advanced = findEntry(schedule, "Advanced");
+  advancedFlagEl.value = advanced !== undefined ? advanced : "";
+
+  // Both relays are written identically on every wave, so the first one found
+  // stands in for the whole mission -- that is all the single input fields hold.
+  const firstWave = waveBlocks[0];
+  const startOutput = findEntry(firstWave, "StartWaveOutput");
+  waveStartRelayEl.value = Array.isArray(startOutput) ? findEntry(startOutput, "Target") || "" : "";
+  const doneOutput = findEntry(firstWave, "DoneOutput");
+  waveDoneRelayEl.value = Array.isArray(doneOutput) ? findEntry(doneOutput, "Target") || "" : "";
+
+  waves = newWaves;
+  missions = newMissions;
+
+  const { mapName, difficulty, missionName } = parsePopFilename(filename || "");
+  if (missionName) missionNameEl.value = missionName;
+  if (difficulty && DIFFICULTY_VALUES.includes(difficulty)) difficultyEl.value = difficulty;
+  if (mapName && getMapsByName()[mapName] && mapSelectEl.value !== mapName) {
+    mapSelectEl.value = mapName;
+    await loadRobots();
+    refreshMapInfo();
+  }
+
+  // usedTemplateNames() only sees robots actually placed in a wave/mission, so
+  // this reports what got left with no body rather than every unresolved name.
+  applyImportedTemplates(getRobotGroups(), importedTemplates);
+  missingCustomTemplates = usedTemplateNames().filter((name) => !getRobotTemplateByName()[name]);
+
+  // One commit for the whole import: everything it touched (mission data and
+  // settings) reverts together on a single undo.
+  store.commit(
+    (state) => {
+      state.waves = waves;
+      state.missions = missions;
+      state.activeWaveIndex = 0;
+      state.activeMissionIndex = 0;
+      state.activeTabType = "wave";
+      state.importedTemplates = importedTemplates;
+      state.settings = readSettingsFromDom();
+    },
+    { affects: ["render", "robotList"] }
+  );
+}
+
+// --- Random Mission ------------------------------------------------------
+// Loosely modeled on real MvM advanced missions (rottenburg/bigrock/decoy):
+// currency ramps up wave over wave, Minigiants/Giants/Tanks unlock only once
+// the mission is partway through, and skill trends from Easy up to Expert.
+// Always builds from whatever robot library is already loaded for the
+// current map, so it never offers a Tank with no path or a Gatebot the map
+// doesn't support.
+
+const RANDOM_WAVE_MIN = 6;
+const RANDOM_WAVE_MAX = 7;
+const RANDOM_BUDGET_MIN = 5000;
+const RANDOM_BUDGET_MAX = 6000;
+
+function randomInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function randomPick(list) {
+  return list[Math.floor(Math.random() * list.length)];
+}
+
+function roundToStep(value, step) {
+  return Math.round(value / step) * step;
+}
+
+function robotGroupNames(label) {
+  const group = getRobotGroups().find((g) => g.label === label);
+  return group ? group.names.filter((n) => n !== TANK_TEMPLATE) : [];
+}
+
+function namesOfClass(names, className) {
+  return names.filter((n) => (getRobotIconByName()[n] || {}).className === className);
+}
+
+// tier runs 0 (wave 1) to 1 (final wave): Easy/Normal dominate early, Hard/Expert late.
+function randomSkillForTier(tier) {
+  const weights =
+    tier < 0.34
+      ? { Easy: 0.5, Normal: 0.4, Hard: 0.1, Expert: 0 }
+      : tier < 0.67
+      ? { Easy: 0.1, Normal: 0.45, Hard: 0.35, Expert: 0.1 }
+      : { Easy: 0, Normal: 0.15, Hard: 0.45, Expert: 0.4 };
+  let roll = Math.random();
+  for (const skill of SKILLS) {
+    roll -= weights[skill] || 0;
+    if (roll <= 0) return skill;
+  }
+  return "Normal";
+}
+
+// Splits a wave's currency budget across its (non-finale) spawns. The last
+// spawn absorbs whatever rounding left over so the wave lands on its budget.
+function distributeWaveCurrency(spawns, budget) {
+  if (!spawns.length) return;
+  const weights = spawns.map(() => 0.6 + Math.random() * 0.8);
+  const weightSum = weights.reduce((a, b) => a + b, 0);
+  let allocated = 0;
+  spawns.forEach((spawn, i) => {
+    if (i === spawns.length - 1) {
+      spawn.totalCurrency = Math.max(0, budget - allocated);
+      return;
+    }
+    const amount = Math.max(25, roundToStep((weights[i] / weightSum) * budget, 25));
+    spawn.totalCurrency = amount;
+    allocated += amount;
+  });
+}
+
+function buildRandomWave(waveIndex, numWaves, budget, pools) {
+  const tier = numWaves > 1 ? waveIndex / (numWaves - 1) : 1;
+  const isFinal = waveIndex === numWaves - 1;
+
+  // Waves start plain; Minigiants and Giants phase in roughly a
+  // quarter/two-fifths of the way through, never on wave 1.
+  const giantUnlockWave = Math.max(1, Math.round(numWaves * 0.4));
+  const minigiantUnlockWave = Math.max(0, Math.round(numWaves * 0.25));
+
+  const giantsUnlocked =
+    waveIndex >= giantUnlockWave &&
+    pools.giants.length &&
+    (pools.giantMedics.length || pools.commonMedics.length);
+  const minigiantsUnlocked = waveIndex >= minigiantUnlockWave && pools.minigiants.length;
+
+  // Reference missions (rottenburg/bigrock/decoy advanced) never put a tank
+  // on wave 1, and even after that only about half of waves get one -- not
+  // "whenever it feels like it" on every wave. The decision is made once per
+  // wave, not re-rolled per spawn (a per-spawn roll compounds across the many
+  // spawns in a wave into tanks showing up far more often than the source
+  // material). Most tank waves get one; a couple of the references had two
+  // or, rarely, three in the same wave.
+  const tankEligible = pools.tankAvailable && waveIndex > 0;
+  const waveHasTank = tankEligible && Math.random() < 0.5;
+  let tanksToPlace = 0;
+  if (waveHasTank) {
+    const countRoll = Math.random();
+    tanksToPlace = countRoll < 0.7 ? 1 : countRoll < 0.9 ? 2 : 3;
+  }
+
+  // A subwave is a group of WaveSpawns sharing one Name -- they spawn
+  // together, and the next subwave waits (WaitForAllDead) for that name to
+  // be fully cleared before it opens up. Each wave gets 2-4 subwaves, and
+  // each subwave gets 1-4 differently-composed WaveSpawns under that name.
+  const numSubwaves = randomInt(2, 4);
+  const spawns = [];
+  let previousSubwaveName = null;
+
+  for (let sub = 0; sub < numSubwaves; sub++) {
+    const subwaveName = `Wave${waveIndex + 1}Sub${sub + 1}`;
+    const waitForPrevious = previousSubwaveName;
+    const numSpawnsInSubwave = randomInt(1, 4);
+
+    for (let k = 0; k < numSpawnsInSubwave; k++) {
+      const spawn = createWaveSpawn();
+      spawn.name = subwaveName;
+      spawn.waitBetweenSpawns = randomInt(2, 6);
+      spawn.waitBeforeStarting = sub === 0 ? 0 : randomInt(0, 5);
+      if (waitForPrevious) {
+        spawn.waitForAllDead = true;
+        spawn.waitForAllDeadName = waitForPrevious;
+      }
+
+      const roll = Math.random();
+
+      if (giantsUnlocked && roll < 0.5) {
+        // A Giant almost never travels alone -- pair it with one or two
+        // Medics, the same way every reference mission escorts its giants.
+        const giant = randomPick(pools.giants);
+        const medicPool = pools.giantMedics.length ? pools.giantMedics : pools.commonMedics;
+        const escortCount = randomInt(1, 2);
+        const slots = [createRobotSlot(giant)];
+        for (let e = 0; e < escortCount; e++) slots.push(createRobotSlot(randomPick(medicPool)));
+        slots.forEach(adoptTemplateDefaults);
+        slots.forEach((slot) => {
+          if (!isGiantTemplate(slot.template)) slot.skill = randomSkillForTier(tier);
+        });
+        spawn.squad = true;
+        spawn.robots = slots;
+        syncSquadCount(spawn);
+      } else {
+        const pool =
+          minigiantsUnlocked && Math.random() < 0.35 && pools.minigiants.length
+            ? pools.minigiants
+            : pools.commonNonMedic;
+        const bot = randomPick(pool.length ? pool : pools.commonNonMedic);
+        const slot = createRobotSlot(bot);
+        adoptTemplateDefaults(slot);
+        slot.skill = randomSkillForTier(tier);
+        spawn.squad = false;
+        spawn.robots = [slot];
+        spawn.totalCount = randomInt(6, 16) + Math.round(tier * 10);
+        spawn.maxActive = randomInt(2, 4);
+        spawn.spawnCount = randomInt(1, 3);
+      }
+
+      spawns.push(spawn);
+    }
+
+    previousSubwaveName = subwaveName;
+  }
+
+  // Tanks land as their own subwave after the rest of the wave, rather than
+  // competing for one of the random per-spawn rolls above -- that guarantees
+  // a wave that decided to have a tank actually gets one, instead of "maybe,
+  // if the dice happened to land on the right spawn."
+  if (tanksToPlace > 0) {
+    const tankSubwaveName = `Wave${waveIndex + 1}Tank`;
+    for (let t = 0; t < tanksToPlace; t++) {
+      const spawn = createWaveSpawn();
+      spawn.name = tankSubwaveName;
+      spawn.waitBetweenSpawns = randomInt(2, 6);
+      spawn.waitBeforeStarting = randomInt(0, 5);
+      if (previousSubwaveName) {
+        spawn.waitForAllDead = true;
+        spawn.waitForAllDeadName = previousSubwaveName;
+      }
+      const slot = createRobotSlot(TANK_TEMPLATE);
+      slot.tank.name = `tankboss_wave${waveIndex + 1}_${t + 1}`;
+      spawn.squad = false;
+      spawn.robots = [slot];
+      spawn.totalCount = 1;
+      spawn.maxActive = 1;
+      spawn.spawnCount = 1;
+      spawns.push(spawn);
+    }
+    previousSubwaveName = tankSubwaveName;
+  }
+
+  // A boss finale is a treat, not a guarantee -- only the last wave is ever
+  // eligible, and even then it's a coin flip. When it happens it's its own
+  // subwave that waits for the wave's last subwave to clear first.
+  let finaleSpawn = null;
+  if (isFinal && pools.boss.length && Math.random() < 0.5) {
+    finaleSpawn = createWaveSpawn();
+    finaleSpawn.name = `Wave${waveIndex + 1}Boss`;
+    finaleSpawn.waitForAllDead = true;
+    finaleSpawn.waitForAllDeadName = previousSubwaveName;
+    const slot = createRobotSlot(randomPick(pools.boss));
+    adoptTemplateDefaults(slot);
+    slot.skill = "Expert";
+    finaleSpawn.squad = false;
+    finaleSpawn.robots = [slot];
+    finaleSpawn.totalCount = 1;
+    finaleSpawn.maxActive = 1;
+    finaleSpawn.spawnCount = 1;
+    finaleSpawn.totalCurrency = 0;
+  }
+
+  distributeWaveCurrency(spawns, budget);
+
+  return {
+    waveSpawns: finaleSpawn ? [...spawns, finaleSpawn] : spawns,
+    activeWaveSpawnIndex: 0,
+  };
+}
+
+// Sentry Busters are non-negotiable: on duty for the whole mission so a
+// turtling team is punished on every wave, not just whichever one a random
+// roll happened to cover. Everything else in Support (Sniper/Spy/Engineer)
+// is genuinely randomized -- how many extra supports, which robots, and what
+// stretch of the mission each one covers.
+function buildRandomSupportMissions(numWaves, supportNames) {
+  const result = [];
+  const sentryBusterName = supportNames.find((n) => SUPPORT_TEMPLATES.includes(n));
+  const otherSupport = supportNames.filter((n) => !SUPPORT_TEMPLATES.includes(n));
+
+  if (sentryBusterName) {
+    const mission = createMission(1);
+    mission.robots = [createRobotSlot(sentryBusterName)];
+    mission.runForThisManyWaves = numWaves;
+    mission.cooldownTime = randomInt(20, 40);
+    mission.desiredCount = randomInt(1, 2);
+    mission.activeSlot = 0;
+    result.push(mission);
+  }
+
+  if (otherSupport.length) {
+    const extraCount = randomInt(1, Math.min(3, otherSupport.length));
+    const shuffled = [...otherSupport].sort(() => Math.random() - 0.5);
+    for (let i = 0; i < extraCount; i++) {
+      const beginAtWave = randomInt(1, numWaves);
+      const span = randomInt(1, numWaves - beginAtWave + 1);
+
+      const mission = createMission(beginAtWave);
+      mission.robots = [createRobotSlot(shuffled[i % shuffled.length])];
+      mission.runForThisManyWaves = span;
+      mission.cooldownTime = randomInt(15, 35);
+      mission.desiredCount = randomInt(1, 2);
+      mission.activeSlot = 0;
+      result.push(mission);
+    }
+  }
+
+  return result;
+}
+
+function generateRandomMission() {
+  const numWaves = randomInt(RANDOM_WAVE_MIN, RANDOM_WAVE_MAX);
+  const totalBudget = randomInt(RANDOM_BUDGET_MIN, RANDOM_BUDGET_MAX);
+  const startingCurrency = roundToStep(totalBudget * (0.12 + Math.random() * 0.08), 50);
+  const waveBudgetTotal = totalBudget - startingCurrency;
+
+  // Increasing weights per wave so later waves pay out more -- currency
+  // scales up alongside the tougher robots those waves unlock.
+  const weights = [];
+  for (let i = 0; i < numWaves; i++) {
+    const tier = numWaves > 1 ? i / (numWaves - 1) : 0;
+    weights.push(0.7 + tier * 0.9 + (Math.random() * 0.2 - 0.1));
+  }
+  const weightSum = weights.reduce((a, b) => a + b, 0);
+  const waveBudgets = weights.map((w) => roundToStep((w / weightSum) * waveBudgetTotal, 25));
+  const drift = waveBudgetTotal - waveBudgets.reduce((a, b) => a + b, 0);
+  waveBudgets[waveBudgets.length - 1] = Math.max(0, waveBudgets[waveBudgets.length - 1] + drift);
+
+  const commonNames = robotGroupNames("Common");
+  const commonMedics = namesOfClass(commonNames, "medic");
+  const giantNames = robotGroupNames("Giant");
+  const giantMedics = namesOfClass(giantNames, "medic");
+
+  const pools = {
+    commonNonMedic: commonNames.filter((n) => !commonMedics.includes(n)),
+    commonMedics,
+    minigiants: robotGroupNames("Minigiants"),
+    giants: giantNames.filter((n) => !giantMedics.includes(n)),
+    giantMedics,
+    boss: robotGroupNames("Boss"),
+    tankAvailable: tankPaths.length > 0,
+  };
+
+  const newWaves = [];
+  for (let w = 0; w < numWaves; w++) {
+    newWaves.push(buildRandomWave(w, numWaves, waveBudgets[w], pools));
+  }
+
+  const missionsResult = buildRandomSupportMissions(numWaves, robotGroupNames("Support"));
+
+  return {
+    waves: newWaves,
+    missions: missionsResult,
+    startingCurrency,
+    // The global thresholds are the mechanism that actually makes Sentry
+    // Busters mandatory: unlike a Mission's BeginAtWave/RunForThisManyWaves,
+    // these have no wave scoping at all -- once set they watch every wave.
+    sentryBusterDamage: randomInt(15, 30) * 100,
+    sentryBusterKills: randomInt(8, 20),
+  };
+}
+
+randomBtnEl.addEventListener("click", () => {
+  if (!getRobotGroups().length) {
+    statusEl.textContent = "Robots are still loading — try again in a moment.";
+    return;
+  }
+  if (!window.confirm("Generate a random mission? This replaces the current mission.")) {
+    return;
+  }
+
+  const result = generateRandomMission();
+  waves = result.waves;
+  missions = result.missions;
+  startingMoneyEl.value = result.startingCurrency;
+  sentryBusterDamageEl.value = result.sentryBusterDamage;
+  sentryBusterKillsEl.value = result.sentryBusterKills;
+
+  store.commit(
+    (state) => {
+      state.waves = waves;
+      state.missions = missions;
+      state.activeWaveIndex = 0;
+      state.activeMissionIndex = 0;
+      state.activeTabType = "wave";
+      state.settings = readSettingsFromDom();
+    },
+    { affects: ["render", "robotList"] }
+  );
+
+  const total = result.startingCurrency + waves.reduce((sum, wave) => sum + waveCurrency(wave), 0);
+  statusEl.textContent = `Generated a random ${waves.length}-wave mission (${total} total currency).`;
+});
+
 function selectWave(index) {
-  activeWaveIndex = index;
-  activeTabType = "wave";
+  store.commit(
+    (state) => {
+      state.activeWaveIndex = index;
+      state.activeTabType = "wave";
+    },
+    { undoable: false, affects: ["render", "robotList"] }
+  );
   setWaveDrawer(false);
-  render();
-  renderRobotList();
 }
 
 function removeWave(index) {
   if (waves.length <= 1) return;
-  waves.splice(index, 1);
-  if (activeWaveIndex >= waves.length) {
-    activeWaveIndex = waves.length - 1;
-  }
-  render();
-  renderRobotList();
+  store.commit(
+    (state) => {
+      state.waves.splice(index, 1);
+      if (state.activeWaveIndex >= state.waves.length) {
+        state.activeWaveIndex = state.waves.length - 1;
+      }
+    },
+    { affects: ["render", "robotList"] }
+  );
 }
 
 function render() {
-  scheduleSave();
+  const activeTabType = getActiveTabType();
+  const activeWaveIndex = getActiveWaveIndex();
   waveTabsEl.innerHTML = "";
 
   waves.forEach((_, i) => {
     const tab = document.createElement("div");
     const active = activeTabType === "wave" && i === activeWaveIndex;
     tab.className = "wave-tab" + (active ? " active" : "");
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", String(active));
     tab.addEventListener("click", () => selectWave(i));
 
     const label = document.createElement("span");
@@ -808,6 +1400,7 @@ function render() {
       const removeBtn = document.createElement("button");
       removeBtn.className = "wave-tab-remove";
       removeBtn.textContent = "×";
+      removeBtn.setAttribute("aria-label", `Remove Wave #${i + 1}`);
       removeBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         removeWave(i);
@@ -823,17 +1416,24 @@ function render() {
 }
 
 function renderMissionTabs() {
+  const activeTabType = getActiveTabType();
+  const activeMissionIndex = getActiveMissionIndex();
   missionTabsEl.innerHTML = "";
 
   missions.forEach((_, i) => {
     const tab = document.createElement("div");
     const active = activeTabType === "mission" && i === activeMissionIndex;
     tab.className = "wave-tab" + (active ? " active" : "");
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", String(active));
     tab.addEventListener("click", () => {
-      activeMissionIndex = i;
-      activeTabType = "mission";
-      render();
-      renderRobotList();
+      store.commit(
+        (state) => {
+          state.activeMissionIndex = i;
+          state.activeTabType = "mission";
+        },
+        { undoable: false, affects: ["render", "robotList"] }
+      );
     });
 
     const label = document.createElement("span");
@@ -844,15 +1444,19 @@ function renderMissionTabs() {
     const removeBtn = document.createElement("button");
     removeBtn.className = "wave-tab-remove";
     removeBtn.textContent = "×";
+    removeBtn.setAttribute("aria-label", `Remove Support #${i + 1}`);
     removeBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      missions.splice(i, 1);
-      if (activeMissionIndex >= missions.length) {
-        activeMissionIndex = missions.length - 1;
-      }
-      if (!missions.length) activeTabType = "wave";
-      render();
-      renderRobotList();
+      store.commit(
+        (state) => {
+          state.missions.splice(i, 1);
+          if (state.activeMissionIndex >= state.missions.length) {
+            state.activeMissionIndex = state.missions.length - 1;
+          }
+          if (!state.missions.length) state.activeTabType = "wave";
+        },
+        { affects: ["render", "robotList"] }
+      );
     });
     tab.appendChild(removeBtn);
 
@@ -867,15 +1471,20 @@ function renderMissionTabs() {
 }
 
 addMissionBtnEl.addEventListener("click", () => {
-  missions.push(createMission(activeWaveIndex + 1));
-  activeMissionIndex = missions.length - 1;
-  activeTabType = "mission";
-  render();
-  renderRobotList();
+  store.commit(
+    (state) => {
+      state.missions.push(createMission(state.activeWaveIndex + 1));
+      state.activeMissionIndex = state.missions.length - 1;
+      state.activeTabType = "mission";
+    },
+    { affects: ["render", "robotList"] }
+  );
 });
 
 function renderWaveSpawns() {
-  scheduleSave();
+  const activeTabType = getActiveTabType();
+  const activeWaveIndex = getActiveWaveIndex();
+  const activeMissionIndex = getActiveMissionIndex();
   waveContentEl.innerHTML = "";
 
   const wave = waves[activeWaveIndex];
@@ -888,25 +1497,36 @@ function renderWaveSpawns() {
   addBtn.title = "Add WaveSpawn";
   addBtn.textContent = "+";
   addBtn.addEventListener("click", () => {
-    wave.waveSpawns.push(createWaveSpawn());
-    wave.activeWaveSpawnIndex = wave.waveSpawns.length - 1;
-    activeTabType = "wave";
-    render();
-    renderRobotList();
+    store.commit(
+      (state) => {
+        wave.waveSpawns.push(createWaveSpawn());
+        wave.activeWaveSpawnIndex = wave.waveSpawns.length - 1;
+        state.activeTabType = "wave";
+      },
+      { affects: ["render", "robotList"] }
+    );
   });
   bar.appendChild(addBtn);
 
   const tabsWrap = document.createElement("div");
   tabsWrap.className = "wavespawn-tabs";
+  tabsWrap.setAttribute("role", "tablist");
+  tabsWrap.setAttribute("aria-label", "WaveSpawns");
 
   wave.waveSpawns.forEach((_, i) => {
     const tab = document.createElement("div");
-    tab.className = "wavespawn-tab" + (activeTabType === "wave" && i === wave.activeWaveSpawnIndex ? " active" : "");
+    const wsActive = activeTabType === "wave" && i === wave.activeWaveSpawnIndex;
+    tab.className = "wavespawn-tab" + (wsActive ? " active" : "");
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", String(wsActive));
     tab.addEventListener("click", () => {
-      wave.activeWaveSpawnIndex = i;
-      activeTabType = "wave";
-      render();
-      renderRobotList();
+      store.commit(
+        (state) => {
+          wave.activeWaveSpawnIndex = i;
+          state.activeTabType = "wave";
+        },
+        { undoable: false, affects: ["render", "robotList"] }
+      );
     });
 
     const label = document.createElement("span");
@@ -917,14 +1537,18 @@ function renderWaveSpawns() {
       const removeBtn = document.createElement("button");
       removeBtn.className = "wavespawn-tab-remove";
       removeBtn.textContent = "×";
+      removeBtn.setAttribute("aria-label", `Remove WaveSpawn #${i + 1}`);
       removeBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        wave.waveSpawns.splice(i, 1);
-        if (wave.activeWaveSpawnIndex >= wave.waveSpawns.length) {
-          wave.activeWaveSpawnIndex = wave.waveSpawns.length - 1;
-        }
-        renderWaveSpawns();
-        renderRobotList();
+        store.commit(
+          () => {
+            wave.waveSpawns.splice(i, 1);
+            if (wave.activeWaveSpawnIndex >= wave.waveSpawns.length) {
+              wave.activeWaveSpawnIndex = wave.waveSpawns.length - 1;
+            }
+          },
+          { affects: ["waveSpawns", "robotList"] }
+        );
       });
       tab.appendChild(removeBtn);
     }
@@ -955,20 +1579,40 @@ function formRow(labelText, inputEl, extraClass) {
   return row;
 }
 
-function textInput(value, onInput, placeholder) {
+// Coalesced undo: the first keystroke/change in an edit session snapshots the
+// state, subsequent ones (before blur) don't -- so one Undo reverts the whole
+// edit, not one character.
+// `validate` (optional) returns an error message string for an invalid value,
+// or a falsy value when it's fine. Advisory only, like numberInput's -- it
+// flags the field but never blocks the edit.
+function textInput(value, onInput, placeholder, affects, validate) {
   const input = document.createElement("input");
   input.type = "text";
   input.value = value || "";
   input.spellcheck = false;
   if (placeholder) input.placeholder = placeholder;
+
+  function updateValidity(v) {
+    if (!validate) return;
+    const message = validate(v);
+    input.classList.toggle("field-invalid", Boolean(message));
+    input.title = message || "";
+  }
+  updateValidity(value || "");
+
+  let snapshotted = false;
   input.addEventListener("input", (e) => {
-    onInput(e.target.value);
-    scheduleSave();
+    updateValidity(e.target.value);
+    store.commit(() => onInput(e.target.value), { undoable: !snapshotted, affects: affects || [] });
+    snapshotted = true;
+  });
+  input.addEventListener("blur", () => {
+    snapshotted = false;
   });
   return input;
 }
 
-function selectInput(options, value, onChange) {
+function selectInput(options, value, onChange, affects) {
   const select = document.createElement("select");
   options.forEach((opt) => {
     const optionEl = document.createElement("option");
@@ -978,88 +1622,55 @@ function selectInput(options, value, onChange) {
     select.appendChild(optionEl);
   });
   select.addEventListener("change", (e) => {
-    onChange(e.target.value);
-    scheduleSave();
+    store.commit(() => onChange(e.target.value), { affects: affects || [] });
   });
   return select;
 }
 
-function numberInput(value, onInput, min, placeholder) {
+// Advisory only, not blocking: a value below `min` gets a red outline and a
+// tooltip explaining why, but is still accepted and written to the file --
+// this is feedback, not validation that rejects the edit.
+function updateNumberValidity(input, value, min) {
+  const invalid = min !== undefined && value < min;
+  input.classList.toggle("field-invalid", invalid);
+  input.title = invalid ? `Must be ${min} or more` : "";
+}
+
+function numberInput(value, onInput, min, placeholder, affects) {
   const input = document.createElement("input");
   input.type = "number";
   input.value = value;
   if (min !== undefined) input.min = min;
   if (placeholder !== undefined) input.placeholder = placeholder;
+  updateNumberValidity(input, value, min);
+  let snapshotted = false;
   input.addEventListener("input", (e) => {
-    onInput(parseInt(e.target.value, 10) || 0);
-    scheduleSave();
+    const v = parseInt(e.target.value, 10) || 0;
+    updateNumberValidity(input, v, min);
+    store.commit(() => onInput(v), {
+      undoable: !snapshotted,
+      affects: affects || [],
+    });
+    snapshotted = true;
+  });
+  input.addEventListener("blur", () => {
+    snapshotted = false;
   });
   return input;
 }
 
-function checkboxRow(labelText, checked, onChange) {
+function checkboxRow(labelText, checked, onChange, affects) {
   const row = document.createElement("label");
   row.className = "checkbox-row";
   const input = document.createElement("input");
   input.type = "checkbox";
   input.checked = checked;
   input.addEventListener("change", (e) => {
-    onChange(e.target.checked);
-    scheduleSave();
+    store.commit(() => onChange(e.target.checked), { affects: affects || [] });
   });
   row.appendChild(input);
   row.appendChild(document.createTextNode(labelText));
   return row;
-}
-
-// TotalCount counts individual bots, not squads. A Squad puts SpawnCount bots
-// on the field at a time -- one full squad -- so the WaveSpawn holds
-// TotalCount / SpawnCount squads and each slot contributes that many bots. A
-// squad of five at TotalCount 5 is one squad: one bot per slot, not five.
-// A non-squad WaveSpawn only ever uses its first robot, TotalCount times.
-function countWaveRobots(wave) {
-  // Keyed by template *and* crit state: the same robot with and without crits
-  // reads as two different threats, so they get their own entries.
-  const counts = new Map();
-
-  const add = (slot, amount) => {
-    const crit = Boolean(slot.alwaysCrit);
-    const key = `${slot.template}|${crit}`;
-    const entry = counts.get(key) || { template: slot.template, crit, count: 0 };
-    entry.count += amount;
-    counts.set(key, entry);
-  };
-
-  wave.waveSpawns.forEach((spawn) => {
-    const slots = filledSlots(spawn);
-    if (!slots.length) return;
-
-    const total = spawn.totalCount || 0;
-
-    if (spawn.squad && slots.length > 1) {
-      const perSquad = spawn.spawnCount || slots.length;
-      const squads = Math.max(1, Math.floor(total / perSquad));
-      slots.forEach((slot) => add(slot, squads));
-      return;
-    }
-
-    add(slots[0], total);
-  });
-
-  return counts;
-}
-
-// A wave's payout is what its WaveSpawns hand out; Missions carry no currency.
-function waveCurrency(wave) {
-  return wave.waveSpawns.reduce((sum, spawn) => sum + (spawn.totalCurrency || 0), 0);
-}
-
-function activeSupportForWave(waveNumber) {
-  return missions.filter((mission) => {
-    const start = mission.beginAtWave;
-    const span = mission.runForThisManyWaves || 1;
-    return waveNumber >= start && waveNumber < start + span;
-  });
 }
 
 function waveBarRobot(robotName, countText, titleText, alwaysCrit) {
@@ -1079,7 +1690,7 @@ function waveBarRobot(robotName, countText, titleText, alwaysCrit) {
 }
 
 function renderWaveBar() {
-  const starting = parseInt(startingMoneyEl.value, 10) || 0;
+  const starting = parseInt(store.getState().settings.startingMoney, 10) || 0;
   startingCurrencyEl.textContent = `Starting Currency: $${starting}`;
 
   waveBarEl.innerHTML = "";
@@ -1089,10 +1700,10 @@ function renderWaveBar() {
 function buildWaveBar(wave, index) {
   const waveNumber = index + 1;
   const counts = countWaveRobots(wave);
-  const support = activeSupportForWave(waveNumber);
+  const support = activeSupportForWave(missions, waveNumber);
 
   const bar = document.createElement("div");
-  bar.className = "wavebar" + (index === activeWaveIndex ? " active" : "");
+  bar.className = "wavebar" + (index === getActiveWaveIndex() ? " active" : "");
   bar.title = `Go to Wave #${waveNumber}`;
   bar.addEventListener("click", () => selectWave(index));
 
@@ -1130,7 +1741,7 @@ function buildWaveBar(wave, index) {
   );
 
   ordered.forEach(({ template, crit, count }) => {
-    const title = `${template} x${count}${crit ? " (crits)" : ""}`;
+    const title = `${robotDisplayName(template)} x${count}${crit ? " (crits)" : ""}`;
     main.appendChild(waveBarRobot(template, count, title, crit));
   });
   body.appendChild(main);
@@ -1150,7 +1761,8 @@ function buildWaveBar(wave, index) {
       const robot = found ? found.template : null;
       const objective = missionObjective(mission);
       const label = robot || objective || "Support";
-      icons.appendChild(waveBarRobot(label, "∞", `${label} (${objective || "no robot"})`));
+      const displayLabel = robot ? robotDisplayName(robot) : label;
+      icons.appendChild(waveBarRobot(label, "∞", `${displayLabel} (${objective || "no robot"})`));
     });
     supportGroup.appendChild(icons);
 
@@ -1198,36 +1810,62 @@ function buildWaveSpawnForm(spawn) {
   }
 
   form.appendChild(
-    checkboxRow("Wait For All Dead", spawn.waitForAllDead, (checked) => {
-      spawn.waitForAllDead = checked;
-      renderWaveSpawns();
-    })
+    checkboxRow(
+      "Wait For All Dead",
+      spawn.waitForAllDead,
+      (checked) => {
+        spawn.waitForAllDead = checked;
+      },
+      ["waveSpawns"]
+    )
   );
   if (spawn.waitForAllDead) {
     form.appendChild(
       formRow(
         "WaveSpawn Name",
-        textInput(spawn.waitForAllDeadName, (v) => {
-          spawn.waitForAllDeadName = v;
-        }),
+        textInput(
+          spawn.waitForAllDeadName,
+          (v) => {
+            spawn.waitForAllDeadName = v;
+          },
+          undefined,
+          [],
+          (v) =>
+            waveSpawnNameExists(waves[getActiveWaveIndex()], v, spawn)
+              ? null
+              : "No other WaveSpawn in this wave has this Name"
+        ),
         "indent"
       )
     );
   }
 
   form.appendChild(
-    checkboxRow("Wait For All Spawned", spawn.waitForAllSpawned, (checked) => {
-      spawn.waitForAllSpawned = checked;
-      renderWaveSpawns();
-    })
+    checkboxRow(
+      "Wait For All Spawned",
+      spawn.waitForAllSpawned,
+      (checked) => {
+        spawn.waitForAllSpawned = checked;
+      },
+      ["waveSpawns"]
+    )
   );
   if (spawn.waitForAllSpawned) {
     form.appendChild(
       formRow(
         "WaveSpawn Name",
-        textInput(spawn.waitForAllSpawnedName, (v) => {
-          spawn.waitForAllSpawnedName = v;
-        }),
+        textInput(
+          spawn.waitForAllSpawnedName,
+          (v) => {
+            spawn.waitForAllSpawnedName = v;
+          },
+          undefined,
+          [],
+          (v) =>
+            waveSpawnNameExists(waves[getActiveWaveIndex()], v, spawn)
+              ? null
+              : "No other WaveSpawn in this wave has this Name"
+        ),
         "indent"
       )
     );
@@ -1266,9 +1904,10 @@ function buildWaveSpawnForm(spawn) {
         spawn.totalCount,
         (v) => {
           spawn.totalCount = v;
-          renderWaveBar();
         },
-        1
+        1,
+        undefined,
+        ["waveBar"]
       )
     )
   );
@@ -1307,10 +1946,10 @@ function buildWaveSpawnForm(spawn) {
         spawn.totalCurrency,
         (v) => {
           spawn.totalCurrency = v;
-          renderWaveBar();
         },
         0,
-        100
+        100,
+        ["waveBar"]
       )
     )
   );
@@ -1318,14 +1957,17 @@ function buildWaveSpawnForm(spawn) {
 
   if (!tankSlot) {
     form.appendChild(
-      checkboxRow("Squad", spawn.squad, (checked) => {
-      spawn.squad = checked;
-      if (!checked) spawn.robots = [spawn.robots[spawn.activeSlot] || spawn.robots[0] || createRobotSlot()];
-      spawn.activeSlot = 0;
-      syncSquadCount(spawn);
-        renderWaveSpawns();
-        renderRobotList(); // Medics appear/disappear with the Squad toggle.
-      })
+      checkboxRow(
+        "Squad",
+        spawn.squad,
+        (checked) => {
+          spawn.squad = checked;
+          if (!checked) spawn.robots = [spawn.robots[spawn.activeSlot] || spawn.robots[0] || createRobotSlot()];
+          spawn.activeSlot = 0;
+          syncSquadCount(spawn);
+        },
+        ["waveSpawns", "robotList"]
+      )
     );
   }
 
@@ -1414,24 +2056,6 @@ function tankPathFor(slot) {
   return tankPaths[0] || "";
 }
 
-// A support Mission's Objective is dictated by the robot in it, so it is derived
-// rather than chosen: the Sentry Buster is the DestroySentries mission and
-// everything else goes by class. A robot with no support role of its own (a
-// gatebot, say) falls back to Sniper, the objective that just patrols.
-const OBJECTIVE_BY_CLASS = {
-  engineer: "Engineer",
-  spy: "Spy",
-  sniper: "Sniper",
-};
-
-function missionObjective(mission) {
-  const slot = filledSlots(mission)[0];
-  if (!slot) return "";
-  if (SUPPORT_TEMPLATES.includes(slot.template)) return "DestroySentries";
-  const meta = robotIconByName[slot.template];
-  return OBJECTIVE_BY_CLASS[meta ? meta.className : ""] || "Sniper";
-}
-
 function buildMissionForm(mission) {
   const form = document.createElement("div");
   form.className = "wavespawn-form";
@@ -1481,9 +2105,10 @@ function buildMissionForm(mission) {
         mission.runForThisManyWaves,
         (v) => {
           mission.runForThisManyWaves = v;
-          renderWaveBar();
         },
-        1
+        1,
+        undefined,
+        ["waveBar"]
       )
     )
   );
@@ -1516,20 +2141,6 @@ function buildMissionForm(mission) {
   form.appendChild(buildRobotSlots(mission));
 
   return form;
-}
-
-// A Squad spawns as one group, so all three counts follow the number of robots
-// in it -- a squad of five is TotalCount 5 / MaxActive 5 / SpawnCount 5, i.e.
-// one squad on the field at a time. Non-squad WaveSpawns are untouched, and
-// this only runs when squad membership actually changes, so manual edits
-// survive until the next robot is added or removed.
-function syncSquadCount(spawn) {
-  if (!spawn || !spawn.squad) return;
-  const count = filledSlots(spawn).length;
-  if (!count) return;
-  spawn.totalCount = count;
-  spawn.maxActive = count;
-  spawn.spawnCount = count;
 }
 
 // Per-robot overrides, rendered under the slot rather than inside it: the slot
@@ -1565,9 +2176,12 @@ function buildSlotOptions(spawn, slotData) {
     crit.title = "This template always crits.";
   }
   critInput.addEventListener("change", (e) => {
-    slotData.alwaysCrit = e.target.checked;
-    scheduleSave();
-    renderWaveSpawns();
+    store.commit(
+      () => {
+        slotData.alwaysCrit = e.target.checked;
+      },
+      { affects: ["waveSpawns"] }
+    );
   });
   crit.appendChild(critInput);
   crit.appendChild(document.createTextNode("Always Crit"));
@@ -1596,9 +2210,12 @@ function buildRobotSlots(spawn, showOptions) {
     const slot = document.createElement("div");
     slot.className = "robot-slot" + (i === spawn.activeSlot ? " active" : "");
     slot.addEventListener("click", () => {
-      spawn.activeSlot = i;
-      renderWaveSpawns();
-      renderRobotList();
+      store.commit(
+        () => {
+          spawn.activeSlot = i;
+        },
+        { undoable: false, affects: ["waveSpawns", "robotList"] }
+      );
     });
     slot.addEventListener("dragover", (e) => {
       e.preventDefault();
@@ -1611,12 +2228,15 @@ function buildRobotSlots(spawn, showOptions) {
       slot.classList.remove("drag-over");
       const name = e.dataTransfer.getData("text/plain");
       if (!name) return;
-      spawn.robots[i].template = name;
-      adoptTemplateDefaults(spawn.robots[i]);
-      applyTankConstraints(spawn);
-      syncSquadCount(spawn);
-      renderWaveSpawns();
-      renderRobotList();
+      store.commit(
+        () => {
+          spawn.robots[i].template = name;
+          adoptTemplateDefaults(spawn.robots[i]);
+          applyTankConstraints(spawn);
+          syncSquadCount(spawn);
+        },
+        { affects: ["waveSpawns", "robotList"] }
+      );
     });
 
     const labelWrap = document.createElement("span");
@@ -1627,24 +2247,28 @@ function buildRobotSlots(spawn, showOptions) {
     }
     const slotName = document.createElement("span");
     slotName.className = "robot-slot-name";
-    slotName.textContent = robotName || "Click or drag a robot here";
+    slotName.textContent = robotName ? robotDisplayName(robotName) : "Click or drag a robot here";
     labelWrap.appendChild(slotName);
-    if (robotName) slot.title = robotName;
+    if (robotName) slot.title = robotDisplayName(robotName);
     slot.appendChild(labelWrap);
 
     if (spawn.squad && spawn.robots.length > 1) {
       const removeBtn = document.createElement("button");
       removeBtn.className = "robot-slot-remove";
       removeBtn.textContent = "×";
+      removeBtn.setAttribute("aria-label", robotName ? `Remove ${robotDisplayName(robotName)} from squad` : "Remove robot from squad");
       removeBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        spawn.robots.splice(i, 1);
-        if (spawn.activeSlot >= spawn.robots.length) {
-          spawn.activeSlot = spawn.robots.length - 1;
-        }
-        syncSquadCount(spawn);
-        renderWaveSpawns();
-        renderRobotList();
+        store.commit(
+          () => {
+            spawn.robots.splice(i, 1);
+            if (spawn.activeSlot >= spawn.robots.length) {
+              spawn.activeSlot = spawn.robots.length - 1;
+            }
+            syncSquadCount(spawn);
+          },
+          { affects: ["waveSpawns", "robotList"] }
+        );
       });
       slot.appendChild(removeBtn);
     }
@@ -1661,11 +2285,14 @@ function buildRobotSlots(spawn, showOptions) {
     addBtn.className = "secondary-btn robot-slot-add";
     addBtn.textContent = "+ Add Robot";
     addBtn.addEventListener("click", () => {
-      spawn.robots.push(createRobotSlot());
-      spawn.activeSlot = spawn.robots.length - 1;
-      syncSquadCount(spawn);
-      renderWaveSpawns();
-      renderRobotList();
+      store.commit(
+        () => {
+          spawn.robots.push(createRobotSlot());
+          spawn.activeSlot = spawn.robots.length - 1;
+          syncSquadCount(spawn);
+        },
+        { affects: ["waveSpawns", "robotList"] }
+      );
     });
     addBtn.addEventListener("dragover", (e) => {
       e.preventDefault();
@@ -1678,14 +2305,17 @@ function buildRobotSlots(spawn, showOptions) {
       addBtn.classList.remove("drag-over");
       const name = e.dataTransfer.getData("text/plain");
       if (!name) return;
-      const added = createRobotSlot(name);
-      adoptTemplateDefaults(added);
-      spawn.robots.push(added);
-      spawn.activeSlot = spawn.robots.length - 1;
-      applyTankConstraints(spawn);
-      syncSquadCount(spawn);
-      renderWaveSpawns();
-      renderRobotList();
+      store.commit(
+        () => {
+          const added = createRobotSlot(name);
+          adoptTemplateDefaults(added);
+          spawn.robots.push(added);
+          spawn.activeSlot = spawn.robots.length - 1;
+          applyTankConstraints(spawn);
+          syncSquadCount(spawn);
+        },
+        { affects: ["waveSpawns", "robotList"] }
+      );
     });
     wrap.appendChild(addBtn);
   }
@@ -1694,28 +2324,29 @@ function buildRobotSlots(spawn, showOptions) {
 }
 
 function generatePopfile() {
-  const startingMoney = parseInt(startingMoneyEl.value, 10) || 0;
-  const respawnWaveTime = parseInt(respawnWaveTimeEl.value, 10) || 6;
-  const canBotsAttackInSpawnRoom = canBotsAttackInSpawnRoomEl.checked ? "yes" : "no";
+  const settings = store.getState().settings;
+  const startingMoney = parseInt(settings.startingMoney, 10) || 0;
+  const respawnWaveTime = parseInt(settings.respawnWaveTime, 10) || 6;
+  const canBotsAttackInSpawnRoom = settings.canBotsAttackInSpawnRoom ? "yes" : "no";
 
   const optionalLines = [];
 
-  if (halloweenEl.checked) optionalLines.push(`\tEventPopfile\tHalloween`);
-  if (fixedRespawnWaveTimeEl.checked) {
+  if (settings.halloween) optionalLines.push(`\tEventPopfile\tHalloween`);
+  if (settings.fixedRespawnWaveTime) {
     optionalLines.push(`\tFixedRespawnWaveTime\tYes`);
   }
 
-  if (sentryBusterDamageEl.value.trim() !== "") {
-    const v = parseInt(sentryBusterDamageEl.value, 10);
+  if (String(settings.sentryBusterDamage).trim() !== "") {
+    const v = parseInt(settings.sentryBusterDamage, 10);
     if (!isNaN(v)) optionalLines.push(`\tAddSentryBusterWhenDamageDealtExceeds\t${v}`);
   }
 
-  if (sentryBusterKillsEl.value.trim() !== "") {
-    const v = parseInt(sentryBusterKillsEl.value, 10);
+  if (String(settings.sentryBusterKills).trim() !== "") {
+    const v = parseInt(settings.sentryBusterKills, 10);
     if (!isNaN(v)) optionalLines.push(`\tAddSentryBusterWhenKillCountExceeds\t${v}`);
   }
 
-  if (parseInt(advancedFlagEl.value, 10) === 1) {
+  if (parseInt(settings.advancedFlag, 10) === 1) {
     optionalLines.push(`\tAdvanced\t1`);
   }
 
@@ -1725,8 +2356,8 @@ function generatePopfile() {
   // Templates are written into the mission itself rather than pulled in with a
   // #base, so the .pop is self-contained.
   const used = usedTemplateNames();
-  const defined = used.filter((name) => robotTemplateByName[name]);
-  missingTemplates = used.filter((name) => !robotTemplateByName[name]);
+  const defined = used.filter((name) => getRobotTemplateByName()[name]);
+  missingTemplates = used.filter((name) => !getRobotTemplateByName()[name]);
 
   const lines = [
     `WaveSchedule`,
@@ -1744,6 +2375,8 @@ function generatePopfile() {
 
   return lines.join("\n");
 }
+
+let missingTemplates = [];
 
 // Only robots that actually reach the file need a definition: a plain WaveSpawn
 // writes its first robot, a Squad writes all of them, and a Mission writes its
@@ -1782,7 +2415,7 @@ function buildTemplatesBlock(names) {
     if (i) lines.push(``);
     lines.push(`		${name}`);
     lines.push(`		{`);
-    lines.push(...serializePopEntries(robotTemplateByName[name], 3));
+    lines.push(...serializePopEntries(getRobotTemplateByName()[name], 3));
     lines.push(`		}`);
   });
   lines.push(`	}`);
@@ -1825,8 +2458,9 @@ function buildMissionBlock(mission) {
 // A typed-in relay name beats whatever was detected off the .bsp. A block whose
 // relay is unknown for the selected map is skipped rather than written empty.
 function waveOutputLines() {
-  const start = waveStartRelayEl.value.trim() || detectedRelays.start;
-  const done = waveDoneRelayEl.value.trim() || detectedRelays.done;
+  const settings = store.getState().settings;
+  const start = settings.waveStartRelay.trim() || detectedRelays.start;
+  const done = settings.waveDoneRelay.trim() || detectedRelays.done;
   const lines = [];
 
   const output = (key, target) => {
@@ -1955,3 +2589,19 @@ function buildWaveSpawnLines(spawn, depth) {
 }
 
 render();
+
+// Exposed only for this project's ad-hoc Playwright smoke tests (there's no
+// test framework here). Not used by the app itself -- safe to ignore.
+window.__popgenDebug = {
+  generatePopfile,
+  getMissingTemplates: () => missingTemplates,
+  getState: () => store.getState(),
+  store,
+  setState: (patch) => {
+    store.commit((state) => {
+      Object.assign(state, patch);
+      waves = state.waves;
+      missions = state.missions;
+    }, { affects: ["render", "robotList"] });
+  },
+};

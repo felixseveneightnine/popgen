@@ -5,9 +5,9 @@
 // entity list, plain text. Two small Range requests get us there, which matters
 // because these maps run 16–44 MB.
 
-const BSP_HEADER_BYTES = 1036;
+export const BSP_HEADER_BYTES = 1036;
 
-async function fetchBspRange(url, start, end) {
+export async function fetchBspRange(url, start, end) {
   const res = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } });
   if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
   const buffer = await res.arrayBuffer();
@@ -17,7 +17,7 @@ async function fetchBspRange(url, start, end) {
   return { buffer, ranged: res.status === 206 };
 }
 
-async function readBspEntityLump(url) {
+export async function readBspEntityLump(url) {
   const head = await fetchBspRange(url, 0, BSP_HEADER_BYTES - 1);
 
   const header = head.ranged ? head.buffer : head.buffer.slice(0, BSP_HEADER_BYTES);
@@ -44,7 +44,7 @@ async function readBspEntityLump(url) {
 }
 
 // The lump is a flat list of { "key" "value" } blocks.
-function parseBspEntities(text) {
+export function parseBspEntities(text) {
   const entities = [];
   const blocks = /\{([^{}]*)\}/g;
   let block;
@@ -60,7 +60,7 @@ function parseBspEntities(text) {
   return entities;
 }
 
-function bspRelayNames(text) {
+export function bspRelayNames(text) {
   return parseBspEntities(text)
     .filter((e) => e.classname === "logic_relay" && e.targetname)
     .map((e) => e.targetname);
@@ -72,7 +72,7 @@ function bspRelayNames(text) {
 // bombpath_arrows_clear_relay. Each list runs most- to least-specific and the
 // alternate game modes are skipped, so a map's "normal" relay wins over its
 // ironman/boss variant.
-const WAVE_START_MATCHERS = [
+export const WAVE_START_MATCHERS = [
   (n) => n === "wave_start_relay",
   (n) => /^wave_start/.test(n) && !/(ironman|boss|666)/.test(n),
   (n) => /^wave_start/.test(n),
@@ -80,7 +80,7 @@ const WAVE_START_MATCHERS = [
   (n) => /^bombpath_arrows_clear/.test(n),
 ];
 
-const WAVE_DONE_MATCHERS = [
+export const WAVE_DONE_MATCHERS = [
   (n) => n === "wave_finished_relay",
   (n) => /^wave_finish/.test(n) && !/(ironman|boss|666)/.test(n),
   (n) => /wave.?finish/.test(n),
@@ -91,9 +91,9 @@ const WAVE_DONE_MATCHERS = [
 // at is where a route begins. Maps name their tank routes boss_path_* or
 // tank_path_*, which is what separates them from lighting rigs and trains
 // (bigrock's vista1_tracktrain_path0, rottenburg's barricade_lightorigin).
-const TANK_PATH_NAME = /(boss|tank)_path/i;
+export const TANK_PATH_NAME = /(boss|tank)_path/i;
 
-function findTankPathStarts(text) {
+export function findTankPathStarts(text) {
   const tracks = parseBspEntities(text).filter(
     (e) => e.classname === "path_track" && e.targetname
   );
@@ -116,7 +116,7 @@ function pickRelay(names, matchers) {
   return "";
 }
 
-function findWaveRelays(names) {
+export function findWaveRelays(names) {
   return {
     start: pickRelay(names, WAVE_START_MATCHERS),
     done: pickRelay(names, WAVE_DONE_MATCHERS),

@@ -1,4 +1,4 @@
-function stripPopComments(text) {
+export function stripPopComments(text) {
   let out = "";
   let inQuotes = false;
   for (let i = 0; i < text.length; i++) {
@@ -18,7 +18,7 @@ function stripPopComments(text) {
   return out;
 }
 
-function tokenizePop(text) {
+export function tokenizePop(text) {
   const tokens = [];
   const re = /"([^"]*)"|(\{)|(\})|(\S+)/g;
   let m;
@@ -31,7 +31,7 @@ function tokenizePop(text) {
   return tokens;
 }
 
-function parsePopBlock(tokens, pos) {
+export function parsePopBlock(tokens, pos) {
   const entries = [];
   while (pos < tokens.length && tokens[pos] !== "}") {
     const key = tokens[pos++];
@@ -48,12 +48,12 @@ function parsePopBlock(tokens, pos) {
   return { entries, pos };
 }
 
-function parsePop(text) {
+export function parsePop(text) {
   const tokens = tokenizePop(stripPopComments(text));
   return parsePopBlock(tokens, 0).entries;
 }
 
-function findEntry(entries, key) {
+export function findEntry(entries, key) {
   const found = entries.find(([k]) => k.toLowerCase() === key.toLowerCase());
   return found ? found[1] : undefined;
 }
@@ -61,7 +61,7 @@ function findEntry(entries, key) {
 // Collects every value for a key anywhere in the subtree. Gate-bot templates nest
 // their Attributes inside EventChangeAttributes { Default { ... } }, so a
 // top-level lookup would miss them.
-function collectValues(entries, key, out) {
+export function collectValues(entries, key, out) {
   const results = out || [];
   entries.forEach(([k, v]) => {
     if (Array.isArray(v)) {
@@ -73,7 +73,7 @@ function collectValues(entries, key, out) {
   return results;
 }
 
-function extractTemplates(text) {
+export function extractTemplates(text) {
   const root = parsePop(text);
   const waveSchedule = findEntry(root, "WaveSchedule");
   if (!Array.isArray(waveSchedule)) return [];
@@ -95,13 +95,13 @@ function extractTemplates(text) {
 // Bare tokens stay bare; anything with whitespace, quotes or braces (attribute
 // names like "fire rate bonus", or a Name with spaces) gets quoted the way the
 // source files write it. Comments are dropped -- the parser strips them.
-function quotePopToken(token) {
+export function quotePopToken(token) {
   const text = String(token);
   return /^[^\s"{}]+$/.test(text) ? text : `"${text.replace(/"/g, "")}"`;
 }
 
 // Turns parsed entries back into pop syntax at the given tab depth.
-function serializePopEntries(entries, depth) {
+export function serializePopEntries(entries, depth) {
   const pad = "	".repeat(depth);
   const lines = [];
 
@@ -119,6 +119,6 @@ function serializePopEntries(entries, depth) {
   return lines;
 }
 
-function extractTemplateNames(text) {
+export function extractTemplateNames(text) {
   return extractTemplates(text).map((t) => t.name);
 }

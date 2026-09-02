@@ -12,11 +12,22 @@
       <h1>TF2 Popfile Generator</h1>
       <p class="subtitle">Build Mann vs. Machine mission files (.pop)</p>
     </div>
-    <button id="waveDrawerToggle" class="drawer-toggle" type="button"
-            aria-controls="waveDrawer" aria-expanded="false">
-      <span class="drawer-toggle-bars" aria-hidden="true"></span>
-      Waves
-    </button>
+    <div class="app-header-actions">
+      <button id="helpBtn" class="drawer-toggle" type="button">
+        <span class="help-icon" aria-hidden="true">?</span>
+        Help
+      </button>
+      <button id="importBtn" class="drawer-toggle" type="button">Import Popfile</button>
+      <input type="file" id="importFileInput" accept=".pop,.txt" hidden>
+      <button id="randomBtn" class="drawer-toggle" type="button">Random Mission</button>
+      <button id="undoBtn" class="drawer-toggle" type="button" title="Undo (Ctrl+Z)">Undo</button>
+      <button id="redoBtn" class="drawer-toggle" type="button" title="Redo (Ctrl+Shift+Z)">Redo</button>
+      <button id="waveDrawerToggle" class="drawer-toggle" type="button"
+              aria-controls="waveDrawer" aria-expanded="false">
+        <span class="drawer-toggle-bars" aria-hidden="true"></span>
+        Waves
+      </button>
+    </div>
   </header>
 
   <main class="layout">
@@ -45,6 +56,11 @@
         <select id="mapSelect">
           <option value="" disabled selected>Loading maps...</option>
         </select>
+
+        <label class="checkbox-row">
+          <input type="checkbox" id="gatebotOverride">
+          This map supports Gatebot
+        </label>
 
         <label class="checkbox-row">
           <input type="checkbox" id="canBotsAttackInSpawnRoom">
@@ -78,21 +94,21 @@
       </section>
 
       <button id="downloadBtn" class="primary-btn">Download Popfile</button>
-      <p id="status" class="status-text"></p>
+      <p id="status" class="status-text" aria-live="polite"></p>
     </aside>
 
     <section class="panel content-panel">
       <div class="wave-tab-bar">
         <button id="addWaveBtn" class="wave-tab-add" title="Add Wave">+</button>
-        <div id="waveTabs" class="wave-tabs"></div>
+        <div id="waveTabs" class="wave-tabs" role="tablist" aria-label="Waves"></div>
         <div class="tab-bar-spacer"></div>
-        <div id="missionTabs" class="wave-tabs"></div>
+        <div id="missionTabs" class="wave-tabs" role="tablist" aria-label="Support missions"></div>
         <button id="addMissionBtn" class="wave-tab-add" title="Add Support">+</button>
       </div>
       <div class="wave-body">
         <aside class="robot-sidebar">
           <h3>Robots</h3>
-          <div id="robotTabs" class="robot-tabs"></div>
+          <div id="robotTabs" class="robot-tabs" role="tablist" aria-label="Robot categories"></div>
           <div id="robotList" class="robot-list"></div>
         </aside>
         <div id="waveContent" class="wave-content"></div>
@@ -115,8 +131,70 @@
   <footer class="app-footer">
   </footer>
 
-  <script src="js/popParser.js"></script>
-  <script src="js/bsp.js"></script>
-  <script src="js/script.js"></script>
+  <div id="helpModalScrim" class="modal-scrim" hidden></div>
+
+  <div id="helpModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="helpModalTitle" hidden>
+    <div class="modal-head">
+      <h2 id="helpModalTitle">How to Use This Tool</h2>
+      <button id="helpModalClose" class="modal-close" type="button" aria-label="Close">&times;</button>
+    </div>
+    <div class="modal-body">
+      <section>
+        <h3>Mission Settings</h3>
+        <p>The left panel sets the mission-wide basics: name, starting money, respawn wave time,
+          difficulty and map. Picking a map reads its .bsp for wave-relay names and tank paths, so
+          Wave Start/Finished Relay show what was detected as a placeholder -- type your own to
+          override it. The Sentry Buster and Advanced fields map straight to their .pop settings.</p>
+      </section>
+
+      <section>
+        <h3>Waves &amp; Support</h3>
+        <p>The <strong>+</strong> at the left of the tab bar adds a Wave; the <strong>+ Support</strong>
+          on the right adds a support Mission (Sniper, Spy, Engineer, Sentry Buster...). Each Wave
+          holds one or more WaveSpawns -- its own tab row just below -- and each WaveSpawn is one
+          group of robots that spawns together under its own timing and currency.</p>
+      </section>
+
+      <section>
+        <h3>Picking Robots</h3>
+        <p>Browse the tabs on the left of the editor (Common, Minigiants, Giant, Boss, Support,
+          Gatebot) and click or drag a robot onto a slot. Turn on <strong>Squad</strong> to fill a
+          WaveSpawn with several robots at once -- Medics only appear in the list once Squad is on,
+          since they only matter paired with someone to heal. A Tank works differently: drop one in
+          and it takes over the whole WaveSpawn (only offered on maps with a tank path).</p>
+      </section>
+
+      <section>
+        <h3>Robot Options</h3>
+        <p>Each filled slot shows a Skill dropdown and an Always Crit toggle. Giants keep the skill
+          their template sets (shown but locked); a template that already always crits shows the
+          toggle checked and locked too, since neither can be overridden.</p>
+      </section>
+
+      <section>
+        <h3>Wave Bar Overview</h3>
+        <p>The <strong>Waves</strong> button top-right opens a drawer with a bar per wave -- currency,
+          robot counts, and any active support -- so you can sanity-check the whole mission's pacing.
+          Click a bar to jump straight to that wave.</p>
+      </section>
+
+      <section>
+        <h3>Import &amp; Random Mission</h3>
+        <p><strong>Import Popfile</strong> loads an existing .pop back in for editing, recovering
+          settings, waves, missions and even hand-written robots it doesn't already know. <strong>Random
+          Mission</strong> generates a fresh 6-7 wave mission with escalating difficulty, currency and
+          robot variety -- a starting point to tweak rather than a final file.</p>
+      </section>
+
+      <section>
+        <h3>Exporting</h3>
+        <p><strong>Download Popfile</strong> at the bottom of the sidebar writes out the finished
+          .pop, named to match the standard <code>mvm_&lt;map&gt;_&lt;difficulty&gt;_&lt;name&gt;.pop</code>
+          convention.</p>
+      </section>
+    </div>
+  </div>
+
+  <script type="module" src="js/script.js"></script>
 </body>
 </html>
